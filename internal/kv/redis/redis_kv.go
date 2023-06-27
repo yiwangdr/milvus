@@ -51,13 +51,6 @@ type redisKV struct {
 
 // NewRedisKV creates a new redis kv.
 func NewRedisKV(client *rdsclient.Client, rootPath string) *redisKV {
-	/*
-		client := rdsclient.NewClient(&rdsclient.Options{
-			Addr:  	  addr,
-			Password: pwd,
-			DB:	  0,  // use default DB
-		})
-	*/
 	kv := &redisKV{
 		client:   client,
 		rootPath: rootPath,
@@ -90,7 +83,9 @@ func (kv *redisKV) WalkWithPrefix(prefix string, paginationSize int, fn func([]b
 
 	for {
 		var err error
-		// TODO: check if scan pagination breaks on newly inserted records.
+		// Note that the walk is not done in a sorted order.
+		// TODO: (1) confirm if sort is required.
+		//       (2) check if scan pagination breaks on newly inserted records.
 		batchKeys, cursor, err = kv.client.Scan(ctx, cursor, prefix+"*", int64(paginationSize)).Result()
 		if err != nil {
 			return errors.Wrap(err, "Failed redis scan while walking")

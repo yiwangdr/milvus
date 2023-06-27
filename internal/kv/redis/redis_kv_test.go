@@ -49,6 +49,22 @@ func setupRedis() {
 	})
 }
 
+func setupRemoteRedis() {
+	pwd := os.Getenv("RedisPwd")
+	if len(pwd) == 0 {
+		panic("Please set redis password to environment variable RedisPwd")
+	}
+	addr := os.Getenv("RedisAddr")
+	if len(addr) == 0 {
+		panic("Please set redis address with port to environment variable RedisAddr")
+	}
+	c = rdsclient.NewClient(&rdsclient.Options{
+		Addr:     addr,
+		Password: pwd,
+		DB:       0, // use default DB
+	})
+}
+
 func TestMain(m *testing.M) {
 	Params.Init()
 	setupRedis()
@@ -401,30 +417,30 @@ func Test_WalkWithPagination(t *testing.T) {
 				"AB/2/100": "v4",
 			}
 
-			expectedSortedKey := maps.Keys(expected)
-			sort.Strings(expectedSortedKey)
+			expectedKeys := maps.Keys(expected)
+			sort.Strings(expectedKeys)
 
 			ret := make(map[string]string)
-			actualSortedKey := make([]string, 0)
+			actualKeys := make([]string, 0)
 
 			err = kv.WalkWithPrefix("A", pagination, func(key []byte, value []byte) error {
 				k := string(key)
 				k = k[len(rootPath)+1:]
 				ret[k] = string(value)
-				actualSortedKey = append(actualSortedKey, k)
+				actualKeys = append(actualKeys, k)
 				return nil
 			})
 
 			assert.NoError(t, err)
 			assert.Equal(t, expected, ret, fmt.Errorf("pagination: %d", pagination))
-			assert.Equal(t, expectedSortedKey, actualSortedKey, fmt.Errorf("pagination: %d", pagination))
+			// Ignore the order.
+			assert.ElementsMatch(t, expectedKeys, actualKeys, fmt.Errorf("pagination: %d", pagination))
 		}
 
+		for p := -1; p < 6; p++ {
+			testFn(p)
+		}
 		testFn(-100)
-		testFn(-1)
-		testFn(0)
-		testFn(1)
-		testFn(5)
 		testFn(100)
 	})
 }
