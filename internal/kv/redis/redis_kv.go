@@ -30,10 +30,9 @@ import (
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
-	/*
-		"github.com/milvus-io/milvus/pkg/metrics"
-		"github.com/milvus-io/milvus/pkg/util/timerecord"
-	*/)
+	"github.com/milvus-io/milvus/pkg/metrics"
+	"github.com/milvus-io/milvus/pkg/util/timerecord"
+)
 
 const (
 	// RequestTimeout is default timeout for redis request.
@@ -117,7 +116,7 @@ func (kv *redisKV) Load(key string) (string, error) {
 	key = path.Join(kv.rootPath, key)
 	ctx, cancel := context.WithTimeout(context.TODO(), RequestTimeout)
 	defer cancel()
-	val, err := kv.client.Get(ctx, key).Result()
+	val, err := kv.getRedisMeta(ctx, key)
 	if err != nil {
 		if err == rdsclient.Nil {
 			return "", common.NewKeyNotExistError(key)
@@ -144,7 +143,7 @@ func (kv *redisKV) MultiLoad(keys []string) ([]string, error) {
 	}
 
 	// Execute the transaction. Don't early return on Exec error as we could get partial results.
-	_, err := tx.Exec(ctx)
+	err := kv.executeTxn(tx, ctx)
 
 	// Extract the results from Get commands
 	values := make([]string, len(keys))
@@ -185,7 +184,7 @@ func (kv *redisKV) LoadWithPrefix(prefix string) ([]string, []string, error) {
 	for i, key := range keys {
 		getCmds[i] = tx.Get(ctx, key)
 	}
-	_, err := tx.Exec(ctx)
+	err := kv.executeTxn(tx, ctx)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "Failed to exec LoadWithPrefix transaction")
 	}
@@ -209,12 +208,25 @@ func (kv *redisKV) LoadWithPrefix(prefix string) ([]string, []string, error) {
 // Save saves the key-value pair.
 func (kv *redisKV) Save(key, value string) error {
 	start := time.Now()
+	rs := timerecord.NewTimeRecorder("putRedisMeta")
 	key = path.Join(kv.rootPath, key)
 	ctx, cancel := context.WithTimeout(context.TODO(), RequestTimeout)
 	defer cancel()
 	CheckValueSizeAndWarn(key, value)
+
+	elapsed := rs.ElapseSpan()
 	err := kv.client.Set(ctx, key, value, RequestTimeout).Err()
+
+	metrics.MetaOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.TotalLabel).Inc()
+	if err == nil {
+		metrics.MetaKvSize.WithLabelValues(metrics.MetaPutLabel).Observe(float64(len(value)))
+		metrics.MetaRequestLatency.WithLabelValues(metrics.MetaPutLabel).Observe(float64(elapsed.Milliseconds()))
+		metrics.MetaOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.SuccessLabel).Inc()
+	} else {
+		metrics.MetaOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.FailLabel).Inc()
+	}
 	CheckElapseAndWarn(start, "Slow redis operation save", zap.String("key", key))
+
 	return err
 }
 
@@ -230,7 +242,7 @@ func (kv *redisKV) MultiSave(kvs map[string]string) error {
 		tx.Set(ctx, key, value, 0)
 	}
 
-	_, err := tx.Exec(ctx)
+	err := kv.executeTxn(tx, ctx)
 	if err != nil {
 		log.Warn("RedisKV MultiSave error", zap.Any("kvs", kvs), zap.Int("len", len(kvs)), zap.Error(err))
 	}
@@ -245,7 +257,18 @@ func (kv *redisKV) Remove(key string) error {
 	ctx, cancel := context.WithTimeout(context.TODO(), RequestTimeout)
 	defer cancel()
 
+	rs := timerecord.NewTimeRecorder("removeRedisMeta")
 	err := kv.client.Del(ctx, key).Err()
+	elapsed := rs.ElapseSpan()
+	metrics.MetaOpCounter.WithLabelValues(metrics.MetaRemoveLabel, metrics.TotalLabel).Inc()
+
+	if err == nil {
+		metrics.MetaRequestLatency.WithLabelValues(metrics.MetaRemoveLabel).Observe(float64(elapsed.Milliseconds()))
+		metrics.MetaOpCounter.WithLabelValues(metrics.MetaRemoveLabel, metrics.SuccessLabel).Inc()
+	} else {
+		metrics.MetaOpCounter.WithLabelValues(metrics.MetaRemoveLabel, metrics.FailLabel).Inc()
+	}
+
 	CheckElapseAndWarn(start, "Slow redis operation remove", zap.String("key", key))
 	return err
 }
@@ -261,7 +284,7 @@ func (kv *redisKV) MultiRemove(keys []string) error {
 	for _, key := range keys {
 		tx.Del(ctx, path.Join(kv.rootPath, key))
 	}
-	_, err := tx.Exec(ctx)
+	err := kv.executeTxn(tx, ctx)
 	if err != nil {
 		log.Warn("RedisKV MultiRemove error", zap.Strings("keys", keys), zap.Int("len", len(keys)), zap.Error(err))
 	}
@@ -289,7 +312,7 @@ func (kv *redisKV) RemoveWithPrefix(prefix string) error {
 	for _, key := range keys {
 		tx.Del(ctx, key)
 	}
-	_, err := tx.Exec(ctx)
+	err := kv.executeTxn(tx, ctx)
 
 	CheckElapseAndWarn(start, "Slow redis operation remove with prefix", zap.String("prefix", prefix))
 	return err
@@ -311,7 +334,7 @@ func (kv *redisKV) MultiSaveAndRemove(saves map[string]string, removals []string
 		tx.Del(ctx, path.Join(kv.rootPath, key))
 	}
 	// Execute the transaction
-	_, err := tx.Exec(ctx)
+	err := kv.executeTxn(tx, ctx)
 	if err != nil {
 		log.Warn("RedisKV MultiSaveAndRemove error",
 			zap.Any("saves", saves),
@@ -346,7 +369,7 @@ func (kv *redisKV) MultiRemoveWithPrefix(prefixes []string) error {
 			tx.Del(ctx, key)
 		}
 	}
-	_, err := tx.Exec(ctx)
+	err := kv.executeTxn(tx, ctx)
 	if err != nil {
 		log.Warn("RedisKV MultiRemoveWithPrefix error", zap.Strings("keys", prefixes), zap.Int("len", len(prefixes)), zap.Error(err))
 	}
@@ -379,7 +402,7 @@ func (kv *redisKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removal
 	}
 
 	// Execute the transaction
-	_, err := tx.Exec(ctx)
+	err := kv.executeTxn(tx, ctx)
 	if err != nil {
 		log.Warn("RedisKV MultiSaveAndRemoveWithPrefix error",
 			zap.Any("saves", saves),
@@ -430,64 +453,39 @@ func CheckTnxStringValueSizeAndWarn(kvs map[string]string) bool {
 	return CheckTnxBytesValueSizeAndWarn(newKvs)
 }
 
-/*
-
-func (kv *redisKV) removeEtcdMeta(ctx context.Context, key string, opts ...rdsclient.OpOption) (*rdsclient.DeleteResponse, error) {
-	ctx1, cancel := context.WithTimeout(ctx, RequestTimeout)
-	defer cancel()
-
-	start := timerecord.NewTimeRecorder("removeEtcdMeta")
-	resp, err := kv.client.Delete(ctx1, key, opts...)
-	elapsed := start.ElapseSpan()
-	metrics.MetaOpCounter.WithLabelValues(metrics.MetaRemoveLabel, metrics.TotalLabel).Inc()
-
-	if err == nil {
-		metrics.MetaRequestLatency.WithLabelValues(metrics.MetaRemoveLabel).Observe(float64(elapsed.Milliseconds()))
-		metrics.MetaOpCounter.WithLabelValues(metrics.MetaRemoveLabel, metrics.SuccessLabel).Inc()
-	} else {
-		metrics.MetaOpCounter.WithLabelValues(metrics.MetaRemoveLabel, metrics.FailLabel).Inc()
-	}
-
-	return resp, err
-}
-
-func (kv *redisKV) getTxnWithCmp(ctx context.Context, cmp ...rdsclient.Cmp) rdsclient.Txn {
-	return kv.client.Txn(ctx).If(cmp...)
-}
-
-func (kv *redisKV) executeTxn(txn rdsclient.Txn, ops ...rdsclient.Op) (*rdsclient.TxnResponse, error) {
+func (kv *redisKV) executeTxn(tx rdsclient.Pipeliner, ctx context.Context) error {
 	start := timerecord.NewTimeRecorder("executeTxn")
 
-	resp, err := txn.Then(ops...).Commit()
 	elapsed := start.ElapseSpan()
 	metrics.MetaOpCounter.WithLabelValues(metrics.MetaTxnLabel, metrics.TotalLabel).Inc()
-
-	if err == nil && resp.Succeeded {
-		// cal put meta kv size
-		totalPutSize := 0
-		for _, op := range ops {
-			if op.IsPut() {
-				totalPutSize += binary.Size(op.ValueBytes())
-			}
-		}
-		metrics.MetaKvSize.WithLabelValues(metrics.MetaPutLabel).Observe(float64(totalPutSize))
-
-		// cal get meta kv size
-		totalGetSize := 0
-		for _, rp := range resp.Responses {
-			if rp.GetResponseRange() != nil {
-				for _, v := range rp.GetResponseRange().Kvs {
-					totalGetSize += binary.Size(v)
-				}
-			}
-		}
-		metrics.MetaKvSize.WithLabelValues(metrics.MetaGetLabel).Observe(float64(totalGetSize))
+	_, err := tx.Exec(ctx)
+	if err == nil {
 		metrics.MetaRequestLatency.WithLabelValues(metrics.MetaTxnLabel).Observe(float64(elapsed.Milliseconds()))
 		metrics.MetaOpCounter.WithLabelValues(metrics.MetaTxnLabel, metrics.SuccessLabel).Inc()
 	} else {
 		metrics.MetaOpCounter.WithLabelValues(metrics.MetaTxnLabel, metrics.FailLabel).Inc()
 	}
 
-	return resp, err
+	return err
 }
-*/
+
+func (kv *redisKV) getRedisMeta(ctx context.Context, key string) (string, error) {
+	ctx1, cancel := context.WithTimeout(ctx, RequestTimeout)
+	defer cancel()
+
+	start := timerecord.NewTimeRecorder("getRedisMeta")
+	val, err := kv.client.Get(ctx1, key).Result()
+	elapsed := start.ElapseSpan()
+	metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.TotalLabel).Inc()
+
+	// cal meta kv size
+	if err == nil {
+		totalSize := binary.Size(val)
+		metrics.MetaKvSize.WithLabelValues(metrics.MetaGetLabel).Observe(float64(totalSize))
+		metrics.MetaRequestLatency.WithLabelValues(metrics.MetaGetLabel).Observe(float64(elapsed.Milliseconds()))
+		metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.SuccessLabel).Inc()
+	} else {
+		metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.FailLabel).Inc()
+	}
+	return val, err
+}
