@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
-	rdsclient "github.com/redis/go-redis/v9"
+	redisClient "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/kv"
@@ -44,12 +44,12 @@ var _ kv.MetaKv = (*redisKV)(nil)
 
 // redisKV implements TxnKV interface, it supports to process multiple kvs in a transaction.
 type redisKV struct {
-	client   *rdsclient.Client
+	client   *redisClient.Client
 	rootPath string
 }
 
 // NewRedisKV creates a new redis kv.
-func NewRedisKV(client *rdsclient.Client, rootPath string) *redisKV {
+func NewRedisKV(client *redisClient.Client, rootPath string) *redisKV {
 	kv := &redisKV{
 		client:   client,
 		rootPath: rootPath,
@@ -118,7 +118,7 @@ func (kv *redisKV) Load(key string) (string, error) {
 	defer cancel()
 	val, err := kv.getRedisMeta(ctx, key)
 	if err != nil {
-		if err == rdsclient.Nil {
+		if err == redisClient.Nil {
 			return "", common.NewKeyNotExistError(key)
 		}
 		return "", errors.Wrap(err, fmt.Sprintf("Failed to read key %s while walking", key))
@@ -137,7 +137,7 @@ func (kv *redisKV) MultiLoad(keys []string) ([]string, error) {
 	tx := kv.client.TxPipeline()
 
 	// Add Get commands for each key to the transaction
-	getCmds := make([]*rdsclient.StringCmd, len(keys))
+	getCmds := make([]*redisClient.StringCmd, len(keys))
 	for i, key := range keys {
 		getCmds[i] = tx.Get(ctx, path.Join(kv.rootPath, key))
 	}
@@ -149,7 +149,7 @@ func (kv *redisKV) MultiLoad(keys []string) ([]string, error) {
 	values := make([]string, len(keys))
 	for i, cmd := range getCmds {
 		value, err := cmd.Result()
-		if err == rdsclient.Nil {
+		if err == redisClient.Nil {
 			values[i] = ""
 		} else if err != nil {
 			return nil, errors.Wrap(err, fmt.Sprintf("Failed to get value for key %s in MultiLoad", keys[i]))
@@ -180,7 +180,7 @@ func (kv *redisKV) LoadWithPrefix(prefix string) ([]string, []string, error) {
 	}
 
 	tx := kv.client.TxPipeline()
-	getCmds := make([]*rdsclient.StringCmd, len(keys))
+	getCmds := make([]*redisClient.StringCmd, len(keys))
 	for i, key := range keys {
 		getCmds[i] = tx.Get(ctx, key)
 	}
@@ -193,7 +193,7 @@ func (kv *redisKV) LoadWithPrefix(prefix string) ([]string, []string, error) {
 	values := make([]string, len(keys))
 	for i, cmd := range getCmds {
 		value, err := cmd.Result()
-		if err == rdsclient.Nil {
+		if err == redisClient.Nil {
 			values[i] = ""
 		} else if err != nil {
 			return nil, nil, errors.Wrap(err, fmt.Sprintf("Failed to get value for key %s in LoadWithPrefix", keys[i]))
@@ -453,7 +453,7 @@ func CheckTnxStringValueSizeAndWarn(kvs map[string]string) bool {
 	return CheckTnxBytesValueSizeAndWarn(newKvs)
 }
 
-func (kv *redisKV) executeTxn(tx rdsclient.Pipeliner, ctx context.Context) error {
+func (kv *redisKV) executeTxn(tx redisClient.Pipeliner, ctx context.Context) error {
 	start := timerecord.NewTimeRecorder("executeTxn")
 
 	elapsed := start.ElapseSpan()

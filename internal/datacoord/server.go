@@ -28,6 +28,7 @@ import (
 
 	"github.com/blang/semver/v4"
 	"github.com/cockroachdb/errors"
+	redisClient "github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
@@ -38,6 +39,7 @@ import (
 	rootcoordclient "github.com/milvus-io/milvus/internal/distributed/rootcoord/client"
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	rediskv "github.com/milvus-io/milvus/internal/kv/redis"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/storage"
@@ -105,6 +107,7 @@ type Server struct {
 	helper           ServerHelper
 
 	etcdCli          *clientv3.Client
+	redisCli         *redisClient.Client
 	address          string
 	kvClient         kv.WatchKV
 	meta             *meta
@@ -418,6 +421,10 @@ func (s *Server) SetEtcdClient(client *clientv3.Client) {
 	s.etcdCli = client
 }
 
+func (s *Server) SetRedisClient(redisClient *redisClient.Client) {
+	s.redisCli = redisClient
+}
+
 func (s *Server) SetRootCoord(rootCoord types.RootCoord) {
 	s.rootCoordClient = rootCoord
 }
@@ -525,11 +532,12 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 		return nil
 	}
 	etcdKV := etcdkv.NewEtcdKV(s.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue())
+	redisKV := rediskv.NewRedisKV(s.redisCli, Params.EtcdCfg.MetaRootPath.GetValue())
 
 	s.kvClient = etcdKV
 	reloadEtcdFn := func() error {
 		var err error
-		catalog := datacoord.NewCatalog(etcdKV, chunkManager.RootPath(), Params.EtcdCfg.MetaRootPath.GetValue())
+		catalog := datacoord.NewCatalog(redisKV, chunkManager.RootPath(), Params.EtcdCfg.MetaRootPath.GetValue())
 		s.meta, err = newMeta(s.ctx, catalog, chunkManager)
 		if err != nil {
 			return err

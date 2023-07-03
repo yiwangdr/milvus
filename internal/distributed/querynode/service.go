@@ -28,6 +28,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/tracer"
 	"github.com/milvus-io/milvus/pkg/util/interceptor"
+	redisClient "github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/zap"
@@ -45,6 +46,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/redis"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
@@ -62,7 +64,8 @@ type Server struct {
 
 	grpcServer *grpc.Server
 
-	etcdCli *clientv3.Client
+	etcdCli  *clientv3.Client
+	redisCli *redisClient.Client
 }
 
 func (s *Server) GetStatistics(ctx context.Context, request *querypb.GetStatisticsRequest) (*internalpb.GetStatisticsResponse, error) {
@@ -108,6 +111,10 @@ func (s *Server) init() error {
 	}
 	s.etcdCli = etcdCli
 	s.SetEtcdClient(etcdCli)
+
+	s.redisCli, _ = redis.GetRedisClient()
+	s.SetRedisClient(s.redisCli)
+
 	s.querynode.SetAddress(Params.GetAddress())
 	log.Debug("QueryNode connect to etcd successfully")
 	s.wg.Add(1)
@@ -241,6 +248,10 @@ func (s *Server) Stop() error {
 // SetEtcdClient sets the etcd client for QueryNode component.
 func (s *Server) SetEtcdClient(etcdCli *clientv3.Client) {
 	s.querynode.SetEtcdClient(etcdCli)
+}
+
+func (s *Server) SetRedisClient(redisClient *redisClient.Client) {
+	s.querynode.SetRedisClient(redisClient)
 }
 
 // GetTimeTickChannel gets the time tick channel of QueryNode.

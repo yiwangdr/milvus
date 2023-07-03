@@ -57,6 +57,8 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/redis"
+	redisClient "github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -85,6 +87,7 @@ type Server struct {
 	grpcExternalServer *grpc.Server
 
 	etcdCli          *clientv3.Client
+	redisCli         *redisClient.Client
 	rootCoordClient  types.RootCoord
 	dataCoordClient  types.DataCoord
 	queryCoordClient types.QueryCoord
@@ -336,6 +339,9 @@ func (s *Server) init() error {
 	s.etcdCli = etcdCli
 	s.proxy.SetEtcdClient(s.etcdCli)
 	s.proxy.SetAddress(Params.GetInternalAddress())
+
+	s.redisCli, _ = redis.GetRedisClient()
+	s.proxy.SetRedisClient(s.redisCli)
 
 	errChan := make(chan error, 1)
 	{

@@ -20,12 +20,18 @@ import (
 	"path"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	redisClient "github.com/redis/go-redis/v9"
 
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	rediskv "github.com/milvus-io/milvus/internal/kv/redis"
 )
 
 // NewTSOKVBase returns a kv.TxnKV object
 func NewTSOKVBase(client *clientv3.Client, tsoRoot, subPath string) kv.TxnKV {
 	return etcdkv.NewEtcdKV(client, path.Join(tsoRoot, subPath))
+}
+
+func NewRedisTSOKVBase(redisCli *redisClient.Client, tsoRoot, subPath string) kv.TxnKV {
+	return rediskv.NewRedisKV(redisCli, path.Join(tsoRoot, subPath))
 }

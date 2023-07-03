@@ -19,6 +19,7 @@ package types
 import (
 	"context"
 
+	redisClient "github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
@@ -117,6 +118,7 @@ type DataNodeComponent interface {
 
 	// SetEtcdClient set etcd client for DataNode
 	SetEtcdClient(etcdClient *clientv3.Client)
+	SetRedisClient(redisClient *redisClient.Client)
 
 	// SetRootCoord set RootCoord for DataNode
 	// `rootCoord` is a client of root coordinator.
@@ -388,6 +390,7 @@ type DataCoordComponent interface {
 	// SetEtcdClient set EtcdClient for DataCoord
 	// `etcdClient` is a client of etcd
 	SetEtcdClient(etcdClient *clientv3.Client)
+	SetRedisClient(redisClient *redisClient.Client)
 
 	SetRootCoord(rootCoord RootCoord)
 
@@ -435,6 +438,7 @@ type IndexNodeComponent interface {
 	GetAddress() string
 	// SetEtcdClient set etcd client for IndexNodeComponent
 	SetEtcdClient(etcdClient *clientv3.Client)
+	SetRedisClient(redisClient *redisClient.Client)
 
 	// UpdateStateCode updates state code for IndexNodeComponent
 	//  `stateCode` is current statement of this QueryCoord, indicating whether it's healthy.
@@ -815,6 +819,7 @@ type RootCoordComponent interface {
 	// SetEtcdClient set EtcdClient for RootCoord
 	// `etcdClient` is a client of etcd
 	SetEtcdClient(etcdClient *clientv3.Client)
+	SetRedisClient(redisClient *redisClient.Client)
 
 	// UpdateStateCode updates state code for RootCoord
 	// State includes: Initializing, Healthy and Abnormal
@@ -893,6 +898,7 @@ type ProxyComponent interface {
 	// SetEtcdClient set EtcdClient for Proxy
 	// `etcdClient` is a client of etcd
 	SetEtcdClient(etcdClient *clientv3.Client)
+	SetRedisClient(redisClient *redisClient.Client)
 
 	//SetRootCoordClient set RootCoord for Proxy
 	// `rootCoord` is a client of root coordinator.
@@ -1464,6 +1470,7 @@ type QueryNodeComponent interface {
 
 	// SetEtcdClient set etcd client for QueryNode
 	SetEtcdClient(etcdClient *clientv3.Client)
+	SetRedisClient(redisClient *redisClient.Client)
 }
 
 // QueryCoord is the interface `querycoord` package implements
@@ -1506,6 +1513,7 @@ type QueryCoordComponent interface {
 
 	// SetEtcdClient set etcd client for QueryCoord
 	SetEtcdClient(etcdClient *clientv3.Client)
+	SetRedisClient(redisClient *redisClient.Client)
 
 	// UpdateStateCode updates state code for QueryCoord
 	//  `stateCode` is current statement of this QueryCoord, indicating whether it's healthy.

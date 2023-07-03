@@ -32,6 +32,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
+	redisClient "github.com/redis/go-redis/v9"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
@@ -80,6 +81,7 @@ type Proxy struct {
 	stateCode atomic.Value
 
 	etcdCli    *clientv3.Client
+	redisCli   *redisClient.Client
 	address    string
 	rootCoord  types.RootCoord
 	dataCoord  types.DataCoord
@@ -464,6 +466,10 @@ func (node *Proxy) GetAddress() string {
 // SetEtcdClient sets etcd client for proxy.
 func (node *Proxy) SetEtcdClient(client *clientv3.Client) {
 	node.etcdCli = client
+}
+
+func (node *Proxy) SetRedisClient(redisClient *redisClient.Client) {
+	node.redisCli = redisClient
 }
 
 // SetRootCoordClient sets RootCoord client for proxy.

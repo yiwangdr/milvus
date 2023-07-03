@@ -34,6 +34,7 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"github.com/golang/protobuf/proto"
+	redisClient "github.com/redis/go-redis/v9"
 	v3rpc "go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
@@ -106,6 +107,7 @@ type DataNode struct {
 	timeTickSender     *timeTickSender
 
 	etcdCli   *clientv3.Client
+	redisCli  *redisClient.Client
 	address   string
 	rootCoord types.RootCoord
 	dataCoord types.DataCoord
@@ -160,6 +162,10 @@ func (node *DataNode) GetAddress() string {
 // SetEtcdClient sets etcd client for DataNode
 func (node *DataNode) SetEtcdClient(etcdCli *clientv3.Client) {
 	node.etcdCli = etcdCli
+}
+
+func (node *DataNode) SetRedisClient(redisClient *redisClient.Client) {
+	node.redisCli = redisClient
 }
 
 // SetRootCoord sets RootCoord's grpc client, error is returned if repeatedly set.

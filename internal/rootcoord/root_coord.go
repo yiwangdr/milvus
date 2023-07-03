@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	redisClient "github.com/redis/go-redis/v9"
 	"github.com/samber/lo"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
@@ -38,6 +39,7 @@ import (
 	"github.com/milvus-io/milvus/internal/allocator"
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	rediskv "github.com/milvus-io/milvus/internal/kv/redis"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/db/dao"
 	"github.com/milvus-io/milvus/internal/metastore/db/dbcore"
@@ -92,12 +94,19 @@ func defaultMetaKVCreator(etcdCli *clientv3.Client) metaKVCreator {
 	}
 }
 
+func defaultRedisMetaKVCreator(client *redisClient.Client) metaKVCreator {
+	return func(root string) (kv.MetaKv, error) {
+		return rediskv.NewRedisKV(client, root), nil
+	}
+}
+
 // Core root coordinator core
 type Core struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup
 	etcdCli          *clientv3.Client
+	redisCli         *redisClient.Client
 	address          string
 	meta             IMetaTable
 	scheduler        IScheduler
@@ -308,6 +317,10 @@ func (c *Core) SetEtcdClient(etcdClient *clientv3.Client) {
 	c.etcdCli = etcdClient
 }
 
+func (c *Core) SetRedisClient(redisClient *redisClient.Client) {
+	c.redisCli = redisClient
+}
+
 func (c *Core) initSession() error {
 	c.session = sessionutil.NewSession(c.ctx, Params.EtcdCfg.MetaRootPath.GetValue(), c.etcdCli)
 	if c.session == nil {
@@ -320,7 +333,8 @@ func (c *Core) initSession() error {
 
 func (c *Core) initKVCreator() {
 	if c.metaKVCreator == nil {
-		c.metaKVCreator = defaultMetaKVCreator(c.etcdCli)
+		// c.metaKVCreator = defaultMetaKVCreator(c.etcdCli)
+		c.metaKVCreator = defaultRedisMetaKVCreator(c.redisCli)
 	}
 }
 
@@ -367,7 +381,7 @@ func (c *Core) initMetaTable() error {
 }
 
 func (c *Core) initIDAllocator() error {
-	tsoKV := tsoutil2.NewTSOKVBase(c.etcdCli, Params.EtcdCfg.KvRootPath.GetValue(), globalIDAllocatorSubPath)
+	tsoKV := tsoutil2.NewRedisTSOKVBase(c.redisCli, Params.EtcdCfg.KvRootPath.GetValue(), globalIDAllocatorSubPath)
 	idAllocator := allocator.NewGlobalIDAllocator(globalIDAllocatorKey, tsoKV)
 	if err := idAllocator.Initialize(); err != nil {
 		return err
@@ -383,7 +397,7 @@ func (c *Core) initIDAllocator() error {
 }
 
 func (c *Core) initTSOAllocator() error {
-	tsoKV := tsoutil2.NewTSOKVBase(c.etcdCli, Params.EtcdCfg.KvRootPath.GetValue(), globalTSOAllocatorSubPath)
+	tsoKV := tsoutil2.NewRedisTSOKVBase(c.redisCli, Params.EtcdCfg.KvRootPath.GetValue(), globalIDAllocatorSubPath)
 	tsoAllocator := tso2.NewGlobalTSOAllocator(globalTSOAllocatorKey, tsoKV)
 	if err := tsoAllocator.Initialize(); err != nil {
 		return err

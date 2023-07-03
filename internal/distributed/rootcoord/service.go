@@ -27,6 +27,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/tracer"
 	"github.com/milvus-io/milvus/pkg/util/interceptor"
+	redisClient "github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/zap"
@@ -45,6 +46,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/redis"
 
 	dcc "github.com/milvus-io/milvus/internal/distributed/datacoord/client"
 	qcc "github.com/milvus-io/milvus/internal/distributed/querycoord/client"
@@ -62,6 +64,7 @@ type Server struct {
 	cancel context.CancelFunc
 
 	etcdCli    *clientv3.Client
+	redisCli   *redisClient.Client
 	dataCoord  types.DataCoord
 	queryCoord types.QueryCoord
 
@@ -170,6 +173,9 @@ func (s *Server) init() error {
 	s.rootCoord.SetEtcdClient(s.etcdCli)
 	s.rootCoord.SetAddress(Params.GetAddress())
 	log.Debug("etcd connect done ...")
+
+	s.redisCli, _ = redis.GetRedisClient()
+	s.rootCoord.SetRedisClient(s.redisCli)
 
 	err = s.startGrpc(Params.Port.GetAsInt())
 	if err != nil {

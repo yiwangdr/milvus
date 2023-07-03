@@ -40,6 +40,7 @@ import (
 	"time"
 	"unsafe"
 
+	redisClient "github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
@@ -107,8 +108,9 @@ type QueryNode struct {
 	scheduler *tasks.Scheduler
 
 	// etcd client
-	etcdCli *clientv3.Client
-	address string
+	etcdCli  *clientv3.Client
+	redisCli *redisClient.Client
+	address  string
 
 	dispClient msgdispatcher.Client
 	factory    dependency.Factory
@@ -388,6 +390,10 @@ func (node *QueryNode) UpdateStateCode(code commonpb.StateCode) {
 // SetEtcdClient assigns parameter client to its member etcdCli
 func (node *QueryNode) SetEtcdClient(client *clientv3.Client) {
 	node.etcdCli = client
+}
+
+func (node *QueryNode) SetRedisClient(redisClient *redisClient.Client) {
+	node.redisCli = redisClient
 }
 
 func (node *QueryNode) GetAddress() string {

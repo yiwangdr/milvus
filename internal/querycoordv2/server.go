@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	redisClient "github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
@@ -34,7 +35,8 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/allocator"
 	"github.com/milvus-io/milvus/internal/kv"
-	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	rediskv "github.com/milvus-io/milvus/internal/kv/redis"
+	// etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
 	"github.com/milvus-io/milvus/internal/querycoordv2/checkers"
 	"github.com/milvus-io/milvus/internal/querycoordv2/dist"
@@ -68,6 +70,7 @@ type Server struct {
 	wg                  sync.WaitGroup
 	status              atomic.Int32
 	etcdCli             *clientv3.Client
+	redisCli            *redisClient.Client
 	address             string
 	session             *sessionutil.Session
 	kv                  kv.MetaKv
@@ -203,12 +206,16 @@ func (s *Server) initQueryCoord() error {
 	s.UpdateStateCode(commonpb.StateCode_Initializing)
 	log.Info("QueryCoord", zap.Any("State", commonpb.StateCode_Initializing))
 	// Init KV
+	/*
 	etcdKV := etcdkv.NewEtcdKV(s.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue())
 	s.kv = etcdKV
+	*/
+	s.kv = rediskv.NewRedisKV(s.redisCli, Params.EtcdCfg.MetaRootPath.GetValue())
 	log.Info("query coordinator try to connect etcd success")
 
 	// Init ID allocator
-	idAllocatorKV := tsoutil.NewTSOKVBase(s.etcdCli, Params.EtcdCfg.KvRootPath.GetValue(), "querycoord-id-allocator")
+	// idAllocatorKV := tsoutil.NewTSOKVBase(s.etcdCli, Params.EtcdCfg.KvRootPath.GetValue(), "querycoord-id-allocator")
+	idAllocatorKV := tsoutil.NewRedisTSOKVBase(s.redisCli, Params.EtcdCfg.KvRootPath.GetValue(), "querycoord-id-allocator")
 	idAllocator := allocator.NewGlobalIDAllocator("idTimestamp", idAllocatorKV)
 	err := idAllocator.Initialize()
 	if err != nil {
@@ -543,6 +550,10 @@ func (s *Server) SetAddress(address string) {
 // SetEtcdClient sets etcd's client
 func (s *Server) SetEtcdClient(etcdClient *clientv3.Client) {
 	s.etcdCli = etcdClient
+}
+
+func (s *Server) SetRedisClient(redisClient *redisClient.Client) {
+	s.redisCli = redisClient
 }
 
 // SetRootCoord sets root coordinator's client

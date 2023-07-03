@@ -25,8 +25,7 @@ import (
 	"time"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
-	"github.com/milvus-io/milvus/internal/util/dependency"
-	"github.com/milvus-io/milvus/pkg/tracer"
+	redisClient "github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/zap"
@@ -39,12 +38,15 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/tracer"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/interceptor"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/redis"
 )
 
 // Server is the grpc wrapper of IndexNode.
@@ -58,7 +60,8 @@ type Server struct {
 	loopCancel func()
 	loopWg     sync.WaitGroup
 
-	etcdCli *clientv3.Client
+	etcdCli  *clientv3.Client
+	redisCli *redisClient.Client
 }
 
 // Run initializes and starts IndexNode's grpc service.
@@ -165,6 +168,10 @@ func (s *Server) init() error {
 	}
 	s.etcdCli = etcdCli
 	s.indexnode.SetEtcdClient(etcdCli)
+
+	s.redisCli, _ = redis.GetRedisClient()
+	s.SetRedisClient(s.redisCli)
+
 	s.indexnode.SetAddress(Params.GetAddress())
 	err = s.indexnode.Init()
 	if err != nil {
@@ -219,6 +226,11 @@ func (s *Server) SetClient(indexNodeClient types.IndexNodeComponent) error {
 // SetEtcdClient sets the etcd client for QueryNode component.
 func (s *Server) SetEtcdClient(etcdCli *clientv3.Client) {
 	s.indexnode.SetEtcdClient(etcdCli)
+}
+
+// SetRedisClient sets the etcd client for QueryNode component.
+func (s *Server) SetRedisClient(redisClient *redisClient.Client) {
+	s.indexnode.SetRedisClient(redisClient)
 }
 
 // GetComponentStates gets the component states of IndexNode.

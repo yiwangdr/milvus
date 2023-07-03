@@ -31,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/interceptor"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	redisClient "github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/zap"
@@ -50,6 +51,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/redis"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 )
 
@@ -61,6 +63,7 @@ type Server struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	etcdCli     *clientv3.Client
+	redisCli    *redisClient.Client
 	factory     dependency.Factory
 
 	rootCoord types.RootCoord
@@ -161,6 +164,10 @@ func (s *Server) SetEtcdClient(client *clientv3.Client) {
 	s.datanode.SetEtcdClient(client)
 }
 
+func (s *Server) SetRedisClient(redisClient *redisClient.Client) {
+	s.datanode.SetRedisClient(redisClient)
+}
+
 func (s *Server) SetRootCoordInterface(ms types.RootCoord) error {
 	return s.datanode.SetRootCoord(ms)
 }
@@ -245,6 +252,9 @@ func (s *Server) init() error {
 	s.SetEtcdClient(s.etcdCli)
 	s.datanode.SetAddress(Params.GetAddress())
 	log.Info("DataNode address", zap.String("address", Params.IP+":"+strconv.Itoa(Params.Port.GetAsInt())))
+
+	s.redisCli, _ = redis.GetRedisClient()
+	s.SetRedisClient(s.redisCli)
 
 	err = s.startGrpc()
 	if err != nil {

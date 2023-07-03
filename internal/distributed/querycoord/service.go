@@ -28,6 +28,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/tracer"
 	"github.com/milvus-io/milvus/pkg/util/interceptor"
+	redisClient "github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/zap"
@@ -47,6 +48,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/redis"
 )
 
 // Server is the grpc server of QueryCoord.
@@ -62,7 +64,8 @@ type Server struct {
 
 	factory dependency.Factory
 
-	etcdCli *clientv3.Client
+	etcdCli  *clientv3.Client
+	redisCli *redisClient.Client
 
 	dataCoord types.DataCoord
 	rootCoord types.RootCoord
@@ -121,6 +124,9 @@ func (s *Server) init() error {
 	s.etcdCli = etcdCli
 	s.SetEtcdClient(etcdCli)
 	s.queryCoord.SetAddress(Params.GetAddress())
+
+	s.redisCli, _ = redis.GetRedisClient()
+	s.SetRedisClient(s.redisCli)
 
 	s.wg.Add(1)
 	go s.startGrpcLoop(Params.Port.GetAsInt())
@@ -270,6 +276,10 @@ func (s *Server) Stop() error {
 // SetRootCoord sets root coordinator's client
 func (s *Server) SetEtcdClient(etcdClient *clientv3.Client) {
 	s.queryCoord.SetEtcdClient(etcdClient)
+}
+
+func (s *Server) SetRedisClient(redisClient *redisClient.Client) {
+	s.queryCoord.SetRedisClient(redisClient)
 }
 
 // SetRootCoord sets the RootCoord's client for QueryCoord component.

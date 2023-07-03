@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/interceptor"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	redisClient "github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/zap"
@@ -47,6 +48,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/redis"
 )
 
 // Server is the grpc server of datacoord
@@ -57,7 +59,8 @@ type Server struct {
 	wg        sync.WaitGroup
 	dataCoord types.DataCoordComponent
 
-	etcdCli *clientv3.Client
+	etcdCli  *clientv3.Client
+	redisCli *redisClient.Client
 
 	grpcErrChan chan error
 	grpcServer  *grpc.Server
@@ -95,6 +98,9 @@ func (s *Server) init() error {
 	s.etcdCli = etcdCli
 	s.dataCoord.SetEtcdClient(etcdCli)
 	s.dataCoord.SetAddress(Params.GetAddress())
+
+	s.redisCli, _ = redis.GetRedisClient()
+	s.dataCoord.SetRedisClient(s.redisCli)
 
 	err = s.startGrpc()
 	if err != nil {
