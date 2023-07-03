@@ -151,6 +151,10 @@ func (p *ComponentParam) Watch(key string, watcher config.EventHandler) {
 	p.mgr.Dispatcher.Register(key, watcher)
 }
 
+func (p *ComponentParam) WatchKeyPrefix(keyPrefix string, watcher config.EventHandler) {
+	p.mgr.Dispatcher.RegisterForKeyPrefix(keyPrefix, watcher)
+}
+
 // /////////////////////////////////////////////////////////////////////////////
 // --- common ---
 type commonConfig struct {
@@ -880,6 +884,7 @@ type proxyConfig struct {
 	SoPath ParamItem `refreshable:"false"`
 
 	TimeTickInterval         ParamItem `refreshable:"false"`
+	HealthCheckTimetout      ParamItem `refreshable:"true"`
 	MsgStreamTimeTickBufSize ParamItem `refreshable:"true"`
 	MaxNameLength            ParamItem `refreshable:"true"`
 	MaxUsernameLength        ParamItem `refreshable:"true"`
@@ -907,6 +912,16 @@ func (p *proxyConfig) init(base *BaseTable) {
 		Export:       true,
 	}
 	p.TimeTickInterval.Init(base.mgr)
+
+	p.HealthCheckTimetout = ParamItem{
+		Key:          "proxy.healthCheckTimetout",
+		Version:      "2.3.0",
+		DefaultValue: "500",
+		PanicIfEmpty: true,
+		Doc:          "ms, the interval that to do component healthy check",
+		Export:       true,
+	}
+	p.HealthCheckTimetout.Init(base.mgr)
 
 	p.MsgStreamTimeTickBufSize = ParamItem{
 		Key:          "proxy.msgStream.timeTick.bufSize",
@@ -1464,6 +1479,12 @@ type queryNodeConfig struct {
 
 	// loader
 	IoPoolSize ParamItem `refreshable:"false"`
+
+	// schedule task policy.
+	SchedulePolicyName                    ParamItem `refreshable:"false"`
+	SchedulePolicyTaskQueueExpire         ParamItem `refreshable:"true"`
+	SchedulePolicyEnableCrossUserGrouping ParamItem `refreshable:"true"`
+	SchedulePolicyMaxPendingTaskPerUser   ParamItem `refreshable:"true"`
 }
 
 func (p *queryNodeConfig) init(base *BaseTable) {
@@ -1788,6 +1809,36 @@ Max read concurrency must greater than or equal to 1, and less than or equal to 
 		Doc:          "Control how many goroutines will the loader use to pull files, if the given value is non-positive, the value will be set to CpuNum * 8, at least 32, and at most 256",
 	}
 	p.IoPoolSize.Init(base.mgr)
+
+	// schedule read task policy.
+	p.SchedulePolicyName = ParamItem{
+		Key:          "queryNode.scheduler.scheduleReadPolicy.name",
+		Version:      "2.3.0",
+		DefaultValue: "fifo",
+		Doc:          "Control how to schedule query/search read task in query node",
+	}
+	p.SchedulePolicyName.Init(base.mgr)
+	p.SchedulePolicyTaskQueueExpire = ParamItem{
+		Key:          "queryNode.scheduler.scheduleReadPolicy.taskQueueExpire",
+		Version:      "2.3.0",
+		DefaultValue: "60",
+		Doc:          "Control how long (many seconds) that queue retains since queue is empty",
+	}
+	p.SchedulePolicyTaskQueueExpire.Init(base.mgr)
+	p.SchedulePolicyEnableCrossUserGrouping = ParamItem{
+		Key:          "queryNode.scheduler.scheduleReadPolicy.enableCrossUserGrouping",
+		Version:      "2.3.0",
+		DefaultValue: "false",
+		Doc:          "Enable Cross user grouping when using user-task-polling policy. (Disable it if user's task can not merge each other)",
+	}
+	p.SchedulePolicyEnableCrossUserGrouping.Init(base.mgr)
+	p.SchedulePolicyMaxPendingTaskPerUser = ParamItem{
+		Key:          "queryNode.scheduler.scheduleReadPolicy.maxPendingTaskPerUser",
+		Version:      "2.3.0",
+		DefaultValue: "1024",
+		Doc:          "Max pending task per user in scheduler",
+	}
+	p.SchedulePolicyMaxPendingTaskPerUser.Init(base.mgr)
 }
 
 // /////////////////////////////////////////////////////////////////////////////

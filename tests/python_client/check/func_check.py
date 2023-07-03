@@ -56,9 +56,17 @@ class ResponseChecker:
             # Search interface of collection and partition that response check
             result = self.check_search_results(self.response, self.func_name, self.check_items)
 
+        elif self.check_task == CheckTasks.check_search_iterator:
+            # Search iterator interface of collection and partition that response check
+            result = self.check_search_iterator(self.response, self.func_name, self.check_items)
+
         elif self.check_task == CheckTasks.check_query_results:
             # Query interface of collection and partition that response check
             result = self.check_query_results(self.response, self.func_name, self.check_items)
+
+        elif self.check_task == CheckTasks.check_query_iterator:
+            # query iterator interface of collection and partition that response check
+            result = self.check_query_iterator(self.response, self.func_name, self.check_items)
 
         elif self.check_task == CheckTasks.check_query_empty:
             result = self.check_query_empty(self.response, self.func_name)
@@ -83,9 +91,14 @@ class ResponseChecker:
         elif self.check_task == CheckTasks.check_permission_deny:
             # Collection interface response check
             result = self.check_permission_deny(self.response, self.succ)
+            
         elif self.check_task == CheckTasks.check_rg_property:
             # describe resource group interface response check
             result = self.check_rg_property(self.response, self.func_name, self.check_items)
+            
+        elif self.check_task == CheckTasks.check_describe_collection_property:
+            # describe collection interface(high level api) response check
+            result = self.check_describe_collection_property(self.response, self.func_name, self.check_items)
 
         # Add check_items here if something new need verify
 
@@ -179,6 +192,48 @@ class ResponseChecker:
         return True
 
     @staticmethod
+    def check_describe_collection_property(res, func_name, check_items):
+        """
+        According to the check_items to check collection properties of res, which return from func_name
+        :param res: actual response of init collection
+        :type res: Collection
+
+        :param func_name: init collection API
+        :type func_name: str
+
+        :param check_items: which items expected to be checked, including name, schema, num_entities, primary
+        :type check_items: dict, {check_key: expected_value}
+        """
+        exp_func_name = "describe_collection"
+        if func_name != exp_func_name:
+            log.warning("The function name is {} rather than {}".format(func_name, exp_func_name))
+        if len(check_items) == 0:
+            raise Exception("No expect values found in the check task")
+        if check_items.get("collection_name", None) is not None:
+            assert res["collection_name"] == check_items.get("collection_name")
+        if check_items.get("auto_id", False):
+            assert res["auto_id"] == check_items.get("auto_id")
+        if check_items.get("num_shards", 1):
+            assert res["num_shards"] == check_items.get("num_shards", 1)
+        if check_items.get("consistency_level", 2):
+            assert res["consistency_level"] == check_items.get("consistency_level", 2)
+        if check_items.get("enable_dynamic_field", True):
+            assert res["enable_dynamic_field"] == check_items.get("enable_dynamic_field", True)
+        if check_items.get("num_partitions", 1):
+            assert res["num_partitions"] == check_items.get("num_partitions", 1)
+        if check_items.get("id_name", "id"):
+            assert res["fields"][0]["name"] == check_items.get("id_name", "id")
+        if check_items.get("vector_name", "vector"):
+            assert res["fields"][1]["name"] == check_items.get("vector_name", "vector")
+        if check_items.get("dim", None) is not None:
+            assert res["fields"][1]["params"]["dim"] == check_items.get("dim")
+        assert res["fields"][0]["is_primary"] is True
+        assert res["fields"][0]["field_id"] == 100 and res["fields"][0]["type"] == 5
+        assert res["fields"][1]["field_id"] == 101 and res["fields"][1]["type"] == 101
+
+        return True
+
+    @staticmethod
     def check_partition_property(partition, func_name, check_items):
         exp_func_name = "init_partition"
         if func_name != exp_func_name:
@@ -248,18 +303,26 @@ class ResponseChecker:
             assert len(search_res) == check_items["nq"]
         else:
             log.info("search_results_check: Numbers of query searched is correct")
+        enable_high_level_api = check_items.get("enable_high_level_api", False)
+        log.debug(search_res)
         for hits in search_res:
             searched_original_vectors = []
+            ids = []
+            if enable_high_level_api:
+                for hit in hits:
+                    ids.append(hit['id'])
+            else:
+                ids = list(hits.ids)
             if (len(hits) != check_items["limit"]) \
-                    or (len(hits.ids) != check_items["limit"]):
+                    or (len(ids) != check_items["limit"]):
                 log.error("search_results_check: limit(topK) searched (%d) "
                           "is not equal with expected (%d)"
                           % (len(hits), check_items["limit"]))
                 assert len(hits) == check_items["limit"]
-                assert len(hits.ids) == check_items["limit"]
+                assert len(ids) == check_items["limit"]
             else:
                 if check_items.get("ids", None) is not None:
-                    ids_match = pc.list_contain_check(list(hits.ids),
+                    ids_match = pc.list_contain_check(ids,
                                                       list(check_items["ids"]))
                     if not ids_match:
                         log.error("search_results_check: ids searched not match")
@@ -279,6 +342,46 @@ class ResponseChecker:
                     pass    # just check nq and topk, not specific ids need check
         log.info("search_results_check: limit (topK) and "
                  "ids searched for %d queries are correct" % len(search_res))
+
+        return True
+
+    @staticmethod
+    def check_search_iterator(search_res, func_name, check_items):
+        """
+        target: check the search iterator results
+        method: 1. check the iterator number
+                2. check the limit(topK) and ids
+                3. check the distance
+        expected: check the search is ok
+        """
+        log.info("search_iterator_results_check: checking the searching results")
+        if func_name != 'search_iterator':
+            log.warning("The function name is {} rather than {}".format(func_name, "search_iterator"))
+        search_iterator = search_res
+        pk_list = []
+        while True:
+            res = search_iterator.next()
+            if len(res[0]) == 0:
+                log.info("search iteration finished, close")
+                search_iterator.close()
+                break
+            if check_items.get("limit", None):
+                assert len(res[0].ids) <= check_items["limit"]
+            if check_items.get("radius", None):
+                for distance in res[0].distances:
+                    if check_items["metric_type"] == "L2":
+                        assert distance < check_items["radius"]
+                    else:
+                        assert distance > check_items["radius"]
+            if check_items.get("range_filter", None):
+                for distance in res[0].distances:
+                    if check_items["metric_type"] == "L2":
+                        assert distance >= check_items["range_filter"]
+                    else:
+                        assert distance <= check_items["range_filter"]
+            pk_list.extend(res[0].ids)
+        assert len(pk_list) == len(set(pk_list))
+        log.info("check: total %d results" % len(pk_list))
 
         return True
 
@@ -316,6 +419,37 @@ class ResponseChecker:
                 log.error(f"Query result {query_res} is not list")
                 return False
         log.warning(f'Expected query result is {exp_res}')
+
+    @staticmethod
+    def check_query_iterator(query_res, func_name, check_items):
+        """
+        target: check the query results
+        method: 1. check the query number
+                2. check the limit(topK) and ids
+                3. check the distance
+        expected: check the search is ok
+        """
+        log.info("query_iterator_results_check: checking the query results")
+        if func_name != 'query_iterator':
+            log.warning("The function name is {} rather than {}".format(func_name, "query_iterator"))
+        query_iterator = query_res
+        pk_list = []
+        while True:
+            res = query_iterator.next()
+            if len(res) == 0:
+                log.info("search iteration finished, close")
+                query_iterator.close()
+                break
+            for i in range(len(res)):
+                pk_list.append(res[i][ct.default_int64_field_name])
+            if check_items.get("limit", None):
+                assert len(res) <= check_items["limit"]
+        assert len(pk_list) == len(set(pk_list))
+        if check_items.get("count", None):
+            assert len(pk_list) == check_items["count"]
+        log.info("check: total %d results" % len(pk_list))
+
+        return True
 
     @staticmethod
     def check_query_empty(query_res, func_name):

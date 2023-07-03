@@ -38,8 +38,10 @@ class ParamInfo:
         self.param_password = ""
         self.param_secure = False
         self.param_replica_num = ct.default_replica_num
+        self.param_uri = ""
+        self.param_token = ""
 
-    def prepare_param_info(self, host, port, handler, replica_num, user, password, secure):
+    def prepare_param_info(self, host, port, handler, replica_num, user, password, secure, uri, token):
         self.param_host = host
         self.param_port = port
         self.param_handler = handler
@@ -47,6 +49,8 @@ class ParamInfo:
         self.param_password = password
         self.param_secure = secure
         self.param_replica_num = replica_num
+        self.param_uri = uri
+        self.param_token = token
 
 
 param_info = ParamInfo()
@@ -150,7 +154,7 @@ def gen_default_collection_schema(description=ct.default_desc, primary_field=ct.
             log.error("Primary key only support int or varchar")
             assert False
     else:
-        fields = [gen_int64_field(), gen_float_field(), gen_string_field(), gen_json_field(), 
+        fields = [gen_int64_field(), gen_float_field(), gen_string_field(), gen_json_field(),
                   gen_float_vec_field(dim=dim)]
         if with_json is False:
             fields.remove(gen_json_field())
@@ -203,7 +207,7 @@ def gen_collection_schema_all_datatype(description=ct.default_desc,
                                        enable_dynamic_field=False, with_json=True, **kwargs):
     if enable_dynamic_field:
         fields = [gen_int64_field(), gen_float_vec_field(dim=dim)]
-    else:    
+    else:
         fields = [gen_int64_field(), gen_int32_field(), gen_int16_field(), gen_int8_field(),
                   gen_bool_field(), gen_float_field(), gen_double_field(), gen_string_field(),
                   gen_json_field(), gen_float_vec_field(dim=dim)]
@@ -674,7 +678,7 @@ def gen_invalid_search_param(index_type, metric_type="L2"):
         for search_list in ["-1"]:
             diskann_search_param = {"metric_type": metric_type, "params": {"search_list": search_list}}
             search_params.append(diskann_search_param)
-    
+
     else:
         log.error("Invalid index_type.")
         raise Exception("Invalid index_type.")
@@ -1070,7 +1074,7 @@ def install_milvus_operator_specific_config(namespace, milvus_mode, release_name
 
     if milvus_mode not in ["standalone", "cluster"]:
         log.error("[milvus_mode] is not 'standalone' or 'cluster'")
-    
+
     if rate_limit_enable not in ["true", "false"]:
         log.error("[rate_limit_enable] is not 'true' or 'false'")
 
@@ -1091,7 +1095,7 @@ def install_milvus_operator_specific_config(namespace, milvus_mode, release_name
         host = mic.endpoint(release_name, NAMESPACE).split(':')[0]
     else:
         raise MilvusException(message=f'Milvus healthy timeout 1800s')
-    
+
     return host
 
 

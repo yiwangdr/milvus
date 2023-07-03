@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"plugin"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -66,6 +67,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/lifetime"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
+	"github.com/samber/lo"
 )
 
 // make sure QueryNode implements types.QueryNode
@@ -105,7 +107,7 @@ type QueryNode struct {
 	loader segments.Loader
 
 	// Search/Query
-	scheduler *tasks.Scheduler
+	scheduler tasks.Scheduler
 
 	// etcd client
 	etcdCli  *clientv3.Client
@@ -280,7 +282,11 @@ func (node *QueryNode) Init() error {
 
 		log.Info("queryNode try to connect etcd success", zap.String("MetaRootPath", paramtable.Get().EtcdCfg.MetaRootPath.GetValue()))
 
-		node.scheduler = tasks.NewScheduler()
+		schedulePolicy := paramtable.Get().QueryNodeCfg.SchedulePolicyName.GetValue()
+		node.scheduler = tasks.NewScheduler(
+			schedulePolicy,
+		)
+		log.Info("queryNode init scheduler", zap.String("policy", schedulePolicy))
 
 		node.clusterManager = cluster.NewWorkerManager(func(nodeID int64) (cluster.Worker, error) {
 			if nodeID == paramtable.GetNodeID() {
@@ -345,7 +351,7 @@ func (node *QueryNode) Init() error {
 // Start mainly start QueryNode's query service.
 func (node *QueryNode) Start() error {
 	node.startOnce.Do(func() {
-		go node.scheduler.Schedule(node.ctx)
+		node.scheduler.Start(node.ctx)
 
 		paramtable.SetCreateTime(time.Now())
 		paramtable.SetUpdateTime(time.Now())
@@ -363,6 +369,34 @@ func (node *QueryNode) Start() error {
 func (node *QueryNode) Stop() error {
 	node.stopOnce.Do(func() {
 		log.Info("Query node stop...")
+		err := node.session.GoingStop()
+		if err != nil {
+			log.Warn("session fail to go stopping state", zap.Error(err))
+		} else {
+			timeoutCh := time.After(paramtable.Get().QueryNodeCfg.GracefulStopTimeout.GetAsDuration(time.Second))
+
+		outer:
+			for node.manager == nil || node.manager.Segment.Empty() {
+				select {
+				case <-timeoutCh:
+					sealedSegments := node.manager.Segment.GetBy(segments.WithType(segments.SegmentTypeSealed))
+					growingSegments := node.manager.Segment.GetBy(segments.WithType(segments.SegmentTypeGrowing))
+					log.Warn("migrate data timed out", zap.Int64("ServerID", paramtable.GetNodeID()),
+						zap.Int64s("sealedSegments", lo.Map[segments.Segment, int64](sealedSegments, func(s segments.Segment, i int) int64 {
+							return s.ID()
+						})),
+						zap.Int64s("growingSegments", lo.Map[segments.Segment, int64](growingSegments, func(t segments.Segment, i int) int64 {
+							return t.ID()
+						})),
+					)
+					break outer
+
+				case <-time.After(time.Second):
+				}
+			}
+
+		}
+
 		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		node.lifetime.Wait()
 		node.cancel()
@@ -374,6 +408,9 @@ func (node *QueryNode) Stop() error {
 		}
 		if node.dispClient != nil {
 			node.dispClient.Close()
+		}
+		if node.manager != nil {
+			node.manager.Segment.Clear()
 		}
 
 		// safe stop
@@ -407,6 +444,8 @@ func (node *QueryNode) SetAddress(address string) {
 type queryHook interface {
 	Run(map[string]any) error
 	Init(string) error
+	InitTuningConfig(map[string]string) error
+	DeleteTuningConfig(string) error
 }
 
 // initHook initializes parameter tuning hook.
@@ -435,8 +474,17 @@ func (node *QueryNode) initHook() error {
 	if err = hoo.Init(paramtable.Get().HookCfg.QueryNodePluginConfig.GetValue()); err != nil {
 		return fmt.Errorf("fail to init configs for the hook, error: %s", err.Error())
 	}
+	if err = hoo.InitTuningConfig(paramtable.Get().HookCfg.QueryNodePluginTuningConfig.GetValue()); err != nil {
+		return fmt.Errorf("fail to init tuning configs for the hook, error: %s", err.Error())
+	}
 
 	node.queryHook = hoo
+	node.handleQueryHookEvent()
+
+	return nil
+}
+
+func (node *QueryNode) handleQueryHookEvent() {
 	onEvent := func(event *config.Event) {
 		if node.queryHook != nil {
 			if err := node.queryHook.Init(event.Value); err != nil {
@@ -444,7 +492,21 @@ func (node *QueryNode) initHook() error {
 			}
 		}
 	}
+	onEvent2 := func(event *config.Event) {
+		if node.queryHook != nil && strings.HasPrefix(event.Key, paramtable.Get().HookCfg.QueryNodePluginTuningConfig.KeyPrefix) {
+			realKey := strings.TrimPrefix(event.Key, paramtable.Get().HookCfg.QueryNodePluginTuningConfig.KeyPrefix)
+			if event.EventType == config.CreateType || event.EventType == config.UpdateType {
+				if err := node.queryHook.InitTuningConfig(map[string]string{realKey: event.Value}); err != nil {
+					log.Error("failed to refresh hook tuning config", zap.Error(err))
+				}
+			} else if event.EventType == config.DeleteType {
+				if err := node.queryHook.DeleteTuningConfig(realKey); err != nil {
+					log.Error("failed to delete hook tuning config", zap.Error(err))
+				}
+			}
+		}
+	}
 	paramtable.Get().Watch(paramtable.Get().HookCfg.QueryNodePluginConfig.Key, config.NewHandler("queryHook", onEvent))
 
-	return nil
+	paramtable.Get().WatchKeyPrefix(paramtable.Get().HookCfg.QueryNodePluginTuningConfig.KeyPrefix, config.NewHandler("queryHook2", onEvent2))
 }

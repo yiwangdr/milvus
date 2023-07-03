@@ -67,6 +67,12 @@ default_replica_num = 1
 default_graceful_time = 5  #
 default_shards_num = 1
 max_shards_num = 16
+default_db = "default"
+max_database_num = 64
+max_collections_per_db = 65536
+max_collection_num = 65536
+
+
 IMAGE_REPOSITORY_MILVUS = "harbor.milvus.io/dockerhub/milvusdb/milvus"
 NAMESPACE_CHAOS_TESTING = "chaos-testing"
 
@@ -243,7 +249,9 @@ class CheckTasks:
     check_collection_property = "check_collection_property"
     check_partition_property = "check_partition_property"
     check_search_results = "check_search_results"
+    check_search_iterator = "check_search_iterator"
     check_query_results = "check_query_results"
+    check_query_iterator = "check_query_iterator"
     check_query_empty = "check_query_empty"  # verify that query result is empty
     check_query_not_empty = "check_query_not_empty"
     check_distance = "check_distance"
@@ -253,6 +261,7 @@ class CheckTasks:
     check_permission_deny = "check_permission_deny"
     check_value_equal = "check_value_equal"
     check_rg_property = "check_resource_group_property"
+    check_describe_collection_property = "check_describe_collection_property"
 
 
 class BulkLoadStates:

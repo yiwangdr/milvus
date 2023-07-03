@@ -19,7 +19,6 @@ package querynodev2
 import (
 	"context"
 	"fmt"
-
 	"strconv"
 	"sync"
 
@@ -721,9 +720,8 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 	}
 
 	task := tasks.NewSearchTask(searchCtx, collection, node.manager, req)
-	if !node.scheduler.Add(task) {
-		err := merr.WrapErrTaskQueueFull()
-		log.Warn("failed to search segments", zap.Error(err))
+	if err := node.scheduler.Add(task); err != nil {
+		log.Warn("failed to search channel", zap.Error(err))
 		return nil, err
 	}
 
@@ -746,7 +744,7 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 	result := task.Result()
 	if result.CostAggregation != nil {
 		// update channel's response time
-		result.CostAggregation.ResponseTime = int64(latency)
+		result.CostAggregation.ResponseTime = latency.Milliseconds()
 	}
 	return result, nil
 }
@@ -764,7 +762,7 @@ func (node *QueryNode) Search(ctx context.Context, req *querypb.SearchRequest) (
 		zap.Bool("fromShardLeader", req.GetFromShardLeader()),
 	)
 
-	log.Info("Received SearchRequest",
+	log.Debug("Received SearchRequest",
 		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
 		zap.Uint64("guaranteeTimestamp", req.GetReq().GetGuaranteeTimestamp()),
 		zap.Uint64("timeTravel", req.GetReq().GetTravelTimestamp()))
@@ -1184,7 +1182,7 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 			Version:    value.Version(),
 		})
 
-		sealed, growing := value.GetSegmentInfo()
+		sealed, growing := value.GetSegmentInfo(false)
 		sealedSegments := make(map[int64]*querypb.SegmentDist)
 		for _, item := range sealed {
 			for _, segment := range item.Segments {
@@ -1210,6 +1208,7 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 			Channel:         key,
 			SegmentDist:     sealedSegments,
 			GrowingSegments: growingSegments,
+			TargetVersion:   value.GetTargetVersion(),
 		})
 		return true
 	})
@@ -1253,13 +1252,14 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 		}, nil
 	}
 
-	//translate segment action
+	// translate segment action
 	removeActions := make([]*querypb.SyncAction, 0)
 	addSegments := make(map[int64][]*querypb.SegmentLoadInfo)
 	for _, action := range req.GetActions() {
 		log := log.With(zap.String("Action",
 			action.GetType().String()),
 			zap.Int64("segmentID", action.SegmentID),
+			zap.Int64("TargetVersion", action.GetTargetVersion()),
 		)
 		log.Info("sync action")
 		switch action.GetType() {
@@ -1267,6 +1267,8 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 			removeActions = append(removeActions, action)
 		case querypb.SyncType_Set:
 			addSegments[action.GetNodeID()] = append(addSegments[action.GetNodeID()], action.GetInfo())
+		case querypb.SyncType_UpdateVersion:
+			shardDelegator.SyncTargetVersion(action.GetTargetVersion(), action.GetGrowingInTarget(), action.GetSealedInTarget())
 		default:
 			return &commonpb.Status{
 				ErrorCode: commonpb.ErrorCode_UnexpectedError,

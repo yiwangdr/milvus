@@ -19,13 +19,17 @@ package proxy
 import (
 	"context"
 	"math"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/metrics"
+	"github.com/milvus-io/milvus/pkg/util/conc"
 	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
@@ -64,9 +68,12 @@ func NewLookAsideBalancer(clientMgr shardClientMgr) *LookAsideBalancer {
 		closeCh:               make(chan struct{}),
 	}
 
-	balancer.wg.Add(1)
-	go balancer.checkQueryNodeHealthLoop()
 	return balancer
+}
+
+func (b *LookAsideBalancer) Start(ctx context.Context) {
+	b.wg.Add(1)
+	go b.checkQueryNodeHealthLoop(ctx)
 }
 
 func (b *LookAsideBalancer) Close() {
@@ -76,11 +83,14 @@ func (b *LookAsideBalancer) Close() {
 	})
 }
 
-func (b *LookAsideBalancer) SelectNode(availableNodes []int64, cost int64) (int64, error) {
+func (b *LookAsideBalancer) SelectNode(ctx context.Context, availableNodes []int64, cost int64) (int64, error) {
+	log := log.Ctx(ctx).WithRateGroup("proxy.LookAsideBalancer", 60, 1)
 	targetNode := int64(-1)
 	targetScore := float64(math.MaxFloat64)
 	for _, node := range availableNodes {
 		if b.unreachableQueryNodes.Contain(node) {
+			log.RatedWarn(30, "query node  is unreachable, skip it",
+				zap.Int64("nodeID", node))
 			continue
 		}
 
@@ -92,17 +102,20 @@ func (b *LookAsideBalancer) SelectNode(availableNodes []int64, cost int64) (int6
 		}
 
 		score := b.calculateScore(cost, executingNQ.Load())
+		metrics.ProxyWorkLoadScore.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(score)
+
 		if targetNode == -1 || score < targetScore {
 			targetScore = score
 			targetNode = node
 		}
 	}
 
-	// update executing task cost
-	totalNQ, ok := b.executingTaskTotalNQ.Get(targetNode)
-	if !ok {
-		totalNQ = atomic.NewInt64(0)
+	if targetNode == -1 {
+		return -1, merr.WrapErrNoAvailableNode("all available nodes are unreachable")
 	}
+
+	// update executing task cost
+	totalNQ, _ := b.executingTaskTotalNQ.Get(targetNode)
 	totalNQ.Add(cost)
 
 	return targetNode, nil
@@ -126,18 +139,26 @@ func (b *LookAsideBalancer) UpdateCostMetrics(node int64, cost *internalpb.CostA
 // calculateScore compute the query node's workload score
 // https://www.usenix.org/conference/nsdi15/technical-sessions/presentation/suresh
 func (b *LookAsideBalancer) calculateScore(cost *internalpb.CostAggregation, executingNQ int64) float64 {
-	if cost == nil || cost.ResponseTime == 0 {
-		return float64(executingNQ)
+	if cost == nil || cost.ResponseTime == 0 || cost.ServiceTime == 0 {
+		return math.Pow(float64(1+executingNQ), 3.0)
 	}
-	return float64(cost.ResponseTime) - float64(1)/float64(cost.ServiceTime) + math.Pow(float64(1+cost.TotalNQ+executingNQ), 3.0)/float64(cost.ServiceTime)
+	executeSpeed := float64(cost.ResponseTime) - float64(1)/float64(cost.ServiceTime)
+	workload := math.Pow(float64(1+cost.TotalNQ+executingNQ), 3.0) / float64(cost.ServiceTime)
+	if workload < 0.0 {
+		return math.MaxFloat64
+	}
+
+	return executeSpeed + workload
 }
 
-func (b *LookAsideBalancer) checkQueryNodeHealthLoop() {
+func (b *LookAsideBalancer) checkQueryNodeHealthLoop(ctx context.Context) {
+	log := log.Ctx(ctx).WithRateGroup("proxy.LookAsideBalancer", 60, 1)
 	defer b.wg.Done()
 
 	ticker := time.NewTicker(checkQueryNodeHealthInterval)
 	defer ticker.Stop()
 	log.Info("Start check query node health loop")
+	pool := conc.NewDefaultPool[any]()
 	for {
 		select {
 		case <-b.closeCh:
@@ -146,40 +167,50 @@ func (b *LookAsideBalancer) checkQueryNodeHealthLoop() {
 
 		case <-ticker.C:
 			now := time.Now().UnixMilli()
+			var futures []*conc.Future[any]
 			b.metricsUpdateTs.Range(func(node int64, lastUpdateTs int64) bool {
 				if now-lastUpdateTs > checkQueryNodeHealthInterval.Milliseconds() {
-					ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-					defer cancel()
+					futures = append(futures, pool.Submit(func() (any, error) {
+						checkInterval := paramtable.Get().ProxyCfg.HealthCheckTimetout.GetAsDuration(time.Millisecond)
+						ctx, cancel := context.WithTimeout(context.Background(), checkInterval)
+						defer cancel()
 
-					checkHealthFailed := func(err error) bool {
-						log.Warn("query node check health failed, add it to unreachable nodes list",
-							zap.Int64("nodeID", node),
-							zap.Error(err))
-						b.unreachableQueryNodes.Insert(node)
-						return true
-					}
+						checkHealthFailed := func(err error) bool {
+							log.RatedWarn(30, "query node check health failed, add it to unreachable nodes list",
+								zap.Int64("nodeID", node),
+								zap.Error(err))
+							b.unreachableQueryNodes.Insert(node)
+							return true
+						}
 
-					qn, err := b.clientMgr.GetClient(ctx, node)
-					if err != nil {
-						return checkHealthFailed(err)
-					}
+						qn, err := b.clientMgr.GetClient(ctx, node)
+						if err != nil {
+							checkHealthFailed(err)
+							return struct{}{}, nil
+						}
 
-					resp, err := qn.GetComponentStates(ctx)
-					if err != nil {
-						return checkHealthFailed(err)
-					}
+						resp, err := qn.GetComponentStates(ctx)
+						if err != nil {
+							checkHealthFailed(err)
+							return struct{}{}, nil
+						}
 
-					if resp.GetState().GetStateCode() != commonpb.StateCode_Healthy {
-						return checkHealthFailed(merr.WrapErrNodeOffline(node))
-					}
+						if resp.GetState().GetStateCode() != commonpb.StateCode_Healthy {
+							checkHealthFailed(merr.WrapErrNodeOffline(node))
+							return struct{}{}, nil
+						}
 
-					// check health successfully, update check health ts
-					b.metricsUpdateTs.Insert(node, time.Now().Local().UnixMilli())
-					b.unreachableQueryNodes.Remove(node)
+						// check health successfully, update check health ts
+						b.metricsUpdateTs.Insert(node, time.Now().Local().UnixMilli())
+						b.unreachableQueryNodes.Remove(node)
+
+						return struct{}{}, nil
+					}))
 				}
 
 				return true
 			})
+			conc.AwaitAll(futures...)
 		}
 	}
 }

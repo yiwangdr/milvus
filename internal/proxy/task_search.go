@@ -159,7 +159,7 @@ func parseSearchInfo(searchParamsPair []*commonpb.KeyValuePair) (*planpb.QueryIn
 	}
 	searchParamStr, err := funcutil.GetAttrByKeyFromRepeatedKV(SearchParamsKey, searchParamsPair)
 	if err != nil {
-		return nil, 0, err
+		searchParamStr = ""
 	}
 	return &planpb.QueryInfo{
 		Topk:         queryTopK,
@@ -384,6 +384,11 @@ func (t *searchTask) PreExecute(ctx context.Context) error {
 	t.SearchRequest.Dsl = t.request.Dsl
 	t.SearchRequest.PlaceholderGroup = t.request.PlaceholderGroup
 
+	// Set username of this search request for feature like task scheduling.
+	if username, _ := GetCurUserFromContext(ctx); username != "" {
+		t.SearchRequest.Username = username
+	}
+
 	log.Ctx(ctx).Debug("search PreExecute done.",
 		zap.Uint64("travel_ts", travelTimestamp), zap.Uint64("guarantee_ts", guaranteeTs),
 		zap.Bool("use_default_consistency", useDefaultConsistency),
@@ -596,7 +601,7 @@ func (t *searchTask) Requery() error {
 		return err
 	}
 	offsets := make(map[any]int)
-	for i := 0; i < typeutil.GetDataSize(pkFieldData); i++ {
+	for i := 0; i < typeutil.GetPKSize(pkFieldData); i++ {
 		pk := typeutil.GetData(pkFieldData, i)
 		offsets[pk] = i
 	}
