@@ -20,14 +20,16 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"path"
-	"strings"
 	"time"
 
 	"github.com/cockroachdb/errors"
+	tikverr "github.com/tikv/client-go/v2/error"
 	tikv "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/txnkv"
 	"github.com/tikv/client-go/v2/txnkv/transaction"
+	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/kv"
@@ -40,6 +42,10 @@ import (
 const (
 	// RequestTimeout is the default timeout for tikv request.
 	RequestTimeout = 10 * time.Second
+	// Grab the latest keys
+	MaxSnapshotTS = uint64(math.MaxUint64)
+	// How many keys to scan per batch when using prefix
+	SnapshotScanSize = 256
 )
 
 func tiTxnBegin(txn *txnkv.Client) (*transaction.KVTxn, error) {
@@ -50,8 +56,16 @@ func tiTxnCommit(txn *transaction.KVTxn, ctx context.Context) error {
 	return txn.Commit(ctx)
 }
 
+func tiTxnSnapshot(txn *txnkv.Client) *txnsnapshot.KVSnapshot {
+	ss := txn.GetSnapshot(MaxSnapshotTS)
+	ss.SetScanBatchSize(SnapshotScanSize)
+	return ss
+
+}
+
 var beginTxn = tiTxnBegin
 var commitTxn = tiTxnCommit
+var getSnapshot = tiTxnSnapshot
 
 // implementation assertion
 var _ kv.MetaKv = (*txnTiKV)(nil)
@@ -93,15 +107,17 @@ func (kv *txnTiKV) Has(key string) (bool, error) {
 	key = path.Join(kv.rootPath, key)
 	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
 	defer cancel()
+
 	_, err := kv.getTiKVMeta(ctx, key)
 	if err != nil {
-		if strings.HasPrefix(err.Error(), "Failed to get value for key") {
+		// Dont error out if not present unless failed call to tikv
+		if common.IsKeyNotExistError(err) {
 			return false, nil
 		} else {
-			return false, errors.Wrap(err, fmt.Sprintf("Failed to create txn for Has of key %s", key))
+			return false, errors.Wrap(err, fmt.Sprintf("Failed to read key: %s", key))
 		}
 	}
-	CheckElapseAndWarn(start, "Slow tikv operation Has()", zap.String("key", key))
+	CheckElapseAndWarn(start, "Slow txnTiKV Has() operation", zap.String("key", key))
 	return true, nil
 }
 
@@ -115,27 +131,19 @@ func rollbackOnFailure(err error, txn *transaction.KVTxn) {
 func (kv *txnTiKV) HasPrefix(prefix string) (bool, error) {
 	start := time.Now()
 	prefix = path.Join(kv.rootPath, prefix)
-	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
-	defer cancel()
 
 	var err error
 	defer logWarnOnFailure(err, "txnTiKV HasPrefix error", zap.String("prefix", prefix), zap.Error(err))
 
-	var txn *transaction.KVTxn
-	txn, err = beginTxn(kv.txn)
-	if err != nil {
-		return false, errors.Wrap(err, fmt.Sprintf("Failed to create txn for HasPrefix of prefix %s", prefix))
-	}
+	ss := getSnapshot(kv.txn)
 
-	// Defer a rollback only if the transaction hasn't been committed
-	defer rollbackOnFailure(err, txn)
-
-	// Retrieve key-value pairs with the specified prefix
+	// Retrieve bounding keys for prefix
 	startKey := []byte(prefix)
 	endKey := tikv.PrefixNextKey([]byte(prefix))
-	iter, err := txn.Iter(startKey, endKey)
+
+	iter, err := ss.Iter(startKey, endKey)
 	if err != nil {
-		return false, errors.Wrap(err, fmt.Sprintf("Failed to iterate for HasPrefix of prefix %s", prefix))
+		return false, errors.Wrap(err, fmt.Sprintf("Failed to create iterator for prefix: %s", prefix))
 	}
 	defer iter.Close()
 
@@ -144,10 +152,7 @@ func (kv *txnTiKV) HasPrefix(prefix string) (bool, error) {
 	if iter.Valid() {
 		r = true
 	}
-	if err = kv.executeTxn(txn, ctx); err != nil {
-		return false, errors.Wrap(err, fmt.Sprintf("Failed to commit txn for HasPrefix of prefix %s", prefix))
-	}
-	CheckElapseAndWarn(start, "Slow load with HasPrefix", zap.String("prefix", prefix))
+	CheckElapseAndWarn(start, "Slow txnTiKV HasPrefix() operation", zap.String("prefix", prefix))
 	return r, nil
 }
 
@@ -163,14 +168,25 @@ func (kv *txnTiKV) Load(key string) (string, error) {
 
 	var val string
 	val, err = kv.getTiKVMeta(ctx, key)
-	if len(val) == 0 {
-		return "", common.NewKeyNotExistError(key)
-	}
+
 	if err != nil {
-		return "", errors.Wrap(err, fmt.Sprintf("Failed to read key %s", key))
+		if common.IsKeyNotExistError(err) {
+			return "", err
+		} else {
+			return "", errors.Wrap(err, fmt.Sprintf("Failed to read key %s", key))
+		}
 	}
-	CheckElapseAndWarn(start, "Slow tikv operation load", zap.String("key", key))
+	CheckElapseAndWarn(start, "Slow txnTiKV Load() operation", zap.String("key", key))
 	return val, nil
+}
+
+func batchConvertFromString(prefix string, keys []string) [][]byte {
+	output := make([][]byte, len(keys))
+	for i := 0; i < len(keys); i++ {
+		keys[i] = path.Join(prefix, keys[i])
+		output[i] = []byte(keys[i])
+	}
+	return output
 }
 
 // MultiLoad gets the values of input keys in a transaction.
@@ -182,55 +198,53 @@ func (kv *txnTiKV) MultiLoad(keys []string) ([]string, error) {
 	var err error
 	defer logWarnOnFailure(err, "txnTiKV MultiLoad error", zap.Strings("keys", keys), zap.Error(err))
 
-	txn, err := beginTxn(kv.txn)
+	// Convert from []string to [][]byte
+	byte_keys := batchConvertFromString(kv.rootPath, keys)
+
+	// Since only reading, use Snapshot for less overhead
+	ss := getSnapshot(kv.txn)
+
+	key_map, err := ss.BatchGet(ctx, byte_keys)
 	if err != nil {
-		return nil, errors.Wrap(err, "Failed to build transaction for MultiLoad")
+		return nil, errors.Wrap(err, "Failed ss.BatchGet() for MultiLoad")
 	}
 
-	// Defer a rollback only if the transaction hasn't been committed
-	defer rollbackOnFailure(err, txn)
+	missing_values := []string{}
+	valid_values := []string{}
 
-	var values []string
-	invalid := make([]string, 0, len(keys))
-	for _, key := range keys {
-		key = path.Join(kv.rootPath, key)
-		value, err := txn.Get(ctx, []byte(key))
-		if err != nil {
-			invalid = append(invalid, key)
+	// Loop through keys and build valid/invalid slices
+	for _, k := range keys {
+		v, ok := key_map[k]
+		if !ok {
+			missing_values = append(missing_values, string(k))
 		}
-		values = append(values, string(value))
-	}
-	err = kv.executeTxn(txn, ctx)
+		valid_values = append(valid_values, string(v))
 
-	if len(invalid) != 0 {
-		err = fmt.Errorf("there are invalid keys: %s", invalid)
 	}
-	CheckElapseAndWarn(start, "Slow tikv operation multi load", zap.Any("keys", keys))
-	return values, err
+
+	err = nil
+	if len(missing_values) != 0 {
+		err = fmt.Errorf("there are invalid keys: %s", missing_values)
+	}
+
+	CheckElapseAndWarn(start, "Slow txnTiKV MultiLoad() operation", zap.Any("keys", keys))
+	return valid_values, err
 }
 
 // LoadWithPrefix returns all the keys and values for the given key prefix.
 func (kv *txnTiKV) LoadWithPrefix(prefix string) ([]string, []string, error) {
 	start := time.Now()
 	prefix = path.Join(kv.rootPath, prefix)
-	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
-	defer cancel()
 
 	var err error
 	defer logWarnOnFailure(err, "txnTiKV LoadWithPrefix error", zap.String("prefix", prefix), zap.Error(err))
 
-	txn, err := beginTxn(kv.txn)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, fmt.Sprintf("Failed to create txn for LoadWithPrefix %s", prefix))
-	}
-
-	// Defer a rollback only if the transaction hasn't been committed
-	defer rollbackOnFailure(err, txn)
+	ss := getSnapshot(kv.txn)
 
 	// Retrieve key-value pairs with the specified prefix
 	startKey := []byte(prefix)
 	endKey := tikv.PrefixNextKey([]byte(prefix))
-	iter, err := txn.Iter(startKey, endKey)
+	iter, err := ss.Iter(startKey, endKey)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, fmt.Sprintf("Failed to create iterater for LoadWithPrefix %s", prefix))
 	}
@@ -238,6 +252,7 @@ func (kv *txnTiKV) LoadWithPrefix(prefix string) ([]string, []string, error) {
 
 	var keys []string
 	var values []string
+
 	// Iterate over the key-value pairs
 	for iter.Valid() {
 		keys = append(keys, string(iter.Key()))
@@ -247,11 +262,8 @@ func (kv *txnTiKV) LoadWithPrefix(prefix string) ([]string, []string, error) {
 			return nil, nil, errors.Wrap(err, fmt.Sprintf("Failed to iterate for LoadWithPrefix %s", prefix))
 		}
 	}
-	err = kv.executeTxn(txn, ctx)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, fmt.Sprintf("Failed to commit txn for LoadWithPrefix %s", prefix))
-	}
-	CheckElapseAndWarn(start, "Slow LoadWithPrefix", zap.String("prefix", prefix))
+
+	CheckElapseAndWarn(start, "Slow txnTiKV LoadWithPrefix() operation", zap.String("prefix", prefix))
 	return keys, values, nil
 }
 
@@ -298,7 +310,7 @@ func (kv *txnTiKV) MultiSave(kvs map[string]string) error {
 		return errors.Wrap(err, "Failed to commit for MultiSave")
 	}
 
-	CheckElapseAndWarn(start, "Slow tikv operation MultiSave", zap.Any("kvs", kvs))
+	CheckElapseAndWarn(start, "Slow txnTiKV MultiSave() operation", zap.Any("kvs", kvs))
 	return nil
 }
 
@@ -318,7 +330,6 @@ func (kv *txnTiKV) Remove(key string) error {
 // MultiRemove removes the input keys in transaction manner.
 func (kv *txnTiKV) MultiRemove(keys []string) error {
 	start := time.Now()
-
 	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
 	defer cancel()
 
@@ -345,7 +356,7 @@ func (kv *txnTiKV) MultiRemove(keys []string) error {
 	if err != nil {
 		return errors.Wrap(err, "Failed to commit for MultiRemove")
 	}
-	CheckElapseAndWarn(start, "Slow tikv operation MultiRemove", zap.Strings("keys", keys))
+	CheckElapseAndWarn(start, "Slow txnTiKV MultiRemove() operation", zap.Strings("keys", keys))
 	return nil
 }
 
@@ -365,7 +376,7 @@ func (kv *txnTiKV) RemoveWithPrefix(prefix string) error {
 	if err != nil {
 		return errors.Wrap(err, "Failed to DeleteRange for RemoveWithPrefix")
 	}
-	CheckElapseAndWarn(start, "Slow tikv operation remove with prefix", zap.String("prefix", prefix))
+	CheckElapseAndWarn(start, "Slow txnTiKV RemoveWithPrefix() operation", zap.String("prefix", prefix))
 	return nil
 }
 
@@ -404,7 +415,7 @@ func (kv *txnTiKV) MultiSaveAndRemove(saves map[string]string, removals []string
 	if err != nil {
 		return errors.Wrap(err, "Failed to commit for MultiSaveAndRemove")
 	}
-	CheckElapseAndWarn(start, "Slow tikv operation multi save and remove", zap.Any("saves", saves), zap.Strings("removals", removals))
+	CheckElapseAndWarn(start, "Slow txnTiKV MultiSaveAndRemove() operation", zap.Any("saves", saves), zap.Strings("removals", removals))
 	return nil
 }
 
@@ -457,7 +468,7 @@ func (kv *txnTiKV) MultiRemoveWithPrefix(prefixes []string) error {
 	if err != nil {
 		return errors.Wrap(err, "Failed to commit for MultiRemoveWithPrefix")
 	}
-	CheckElapseAndWarn(start, "Slow tikv operation multi remove with prefix", zap.Strings("keys", prefixes))
+	CheckElapseAndWarn(start, "Slow txnTiKV MultiRemoveWithPrefix() operation", zap.Strings("keys", prefixes))
 	return nil
 }
 
@@ -520,7 +531,7 @@ func (kv *txnTiKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removal
 	if err != nil {
 		return errors.Wrap(err, "Failed to commit for MultiSaveAndRemoveWithPrefix")
 	}
-	CheckElapseAndWarn(start, "Slow tikv operation multi save and move with prefix", zap.Any("saves", saves), zap.Strings("removals", removals))
+	CheckElapseAndWarn(start, "Slow txnTiKV MultiSaveAndRemoveWithPrefix() operation", zap.Any("saves", saves), zap.Strings("removals", removals))
 	return nil
 }
 
@@ -528,24 +539,17 @@ func (kv *txnTiKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removal
 func (kv *txnTiKV) WalkWithPrefix(prefix string, paginationSize int, fn func([]byte, []byte) error) error {
 	start := time.Now()
 	prefix = path.Join(kv.rootPath, prefix)
-	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
-	defer cancel()
 
 	var err error
 	defer logWarnOnFailure(err, "txnTiKV WalkWithPagination error", zap.String("prefix", prefix), zap.Error(err))
 
-	txn, err := beginTxn(kv.txn)
-	if err != nil {
-		return errors.Wrap(err, "Failed to create txn for WalkWithPrefix")
-	}
-
-	// Defer a rollback only if the transaction hasn't been committed
-	defer rollbackOnFailure(err, txn)
+	// Since only reading, use Snapshot for less overhead
+	ss := getSnapshot(kv.txn)
 
 	// Retrieve key-value pairs with the specified prefix
 	startKey := []byte(prefix)
 	endKey := tikv.PrefixNextKey([]byte(prefix))
-	iter, err := txn.Iter(startKey, endKey)
+	iter, err := ss.Iter(startKey, endKey)
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("Failed to create iterater for %s during WalkWithPrefix", prefix))
 	}
@@ -562,23 +566,8 @@ func (kv *txnTiKV) WalkWithPrefix(prefix string, paginationSize int, fn func([]b
 			return errors.Wrap(err, fmt.Sprintf("Failed to move Iterator after key %s for WalkWithPrefix", string(iter.Key())))
 		}
 	}
-	err = kv.executeTxn(txn, ctx)
-	if err != nil {
-		return errors.Wrap(err, "Failed to commit for WalkWithPagination")
-	}
-
-	CheckElapseAndWarn(start, "Slow tikv operation(WalkWithPagination)", zap.String("prefix", prefix))
+	CheckElapseAndWarn(start, "Slow txnTiKV WalkWithPagination() operation", zap.String("prefix", prefix))
 	return nil
-}
-
-// CheckElapseAndWarn checks the elapsed time and warns if it is too long.
-func CheckElapseAndWarn(start time.Time, message string, fields ...zap.Field) bool {
-	elapsed := time.Since(start)
-	if elapsed.Milliseconds() > 2000 {
-		log.Warn(message, append([]zap.Field{zap.String("time spent", elapsed.String())}, fields...)...)
-		return true
-	}
-	return false
 }
 
 func (kv *txnTiKV) executeTxn(txn *transaction.KVTxn, ctx context.Context) error {
@@ -603,32 +592,32 @@ func (kv *txnTiKV) getTiKVMeta(ctx context.Context, key string) (string, error) 
 
 	start := timerecord.NewTimeRecorder("getTiKVMeta")
 
-	txn, err := beginTxn(kv.txn)
-	if err != nil {
-		return "", errors.Wrap(err, "Failed to build transaction for getTiKVMeta")
-	}
-	// Defer a rollback only if the transaction hasn't been committed
-	defer rollbackOnFailure(err, txn)
+	ss := getSnapshot(kv.txn)
 
-	val, err := txn.Get(ctx1, []byte(key))
+	val, err := ss.Get(ctx1, []byte(key))
+
 	if err != nil {
-		return "", errors.Wrap(err, fmt.Sprintf("Failed to get value for key %s in getTiKVMeta", key))
+		// Log key read fail
+		metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.FailLabel).Inc()
+		if err == tikverr.ErrNotExist {
+			// If key is missing
+			return "", common.NewKeyNotExistError(key)
+
+		} else {
+			// If call to tikv fails
+			return "", errors.Wrap(err, fmt.Sprintf("Failed to get value for key %s in getTiKVMeta", key))
+		}
 	}
-	err = commitTxn(txn, ctx1)
 
 	elapsed := start.ElapseSpan()
-	metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.TotalLabel).Inc()
+	totalSize := binary.Size(val)
 
-	// cal meta kv size
-	if err == nil {
-		totalSize := binary.Size(val)
-		metrics.MetaKvSize.WithLabelValues(metrics.MetaGetLabel).Observe(float64(totalSize))
-		metrics.MetaRequestLatency.WithLabelValues(metrics.MetaGetLabel).Observe(float64(elapsed.Milliseconds()))
-		metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.SuccessLabel).Inc()
-	} else {
-		metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.FailLabel).Inc()
-	}
-	return string(val), err
+	metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.TotalLabel).Inc()
+	metrics.MetaKvSize.WithLabelValues(metrics.MetaGetLabel).Observe(float64(totalSize))
+	metrics.MetaRequestLatency.WithLabelValues(metrics.MetaGetLabel).Observe(float64(elapsed.Milliseconds()))
+	metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.SuccessLabel).Inc()
+
+	return string(val), nil
 }
 
 func (kv *txnTiKV) putTiKVMeta(ctx context.Context, key, val string) error {
@@ -646,7 +635,7 @@ func (kv *txnTiKV) putTiKVMeta(ctx context.Context, key, val string) error {
 
 	err = txn.Set([]byte(key), []byte(val))
 	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("Failed to set kv pair (%s, %s) in putTiKVMeta", key, val))
+		return errors.Wrap(err, fmt.Sprintf("Failed to get value for key %s in putTiKVMeta", key))
 	}
 	err = commitTxn(txn, ctx1)
 
@@ -671,14 +660,14 @@ func (kv *txnTiKV) removeTiKVMeta(ctx context.Context, key string) error {
 
 	txn, err := beginTxn(kv.txn)
 	if err != nil {
-		return errors.Wrap(err, "Failed to build transaction for putTiKVMeta")
+		return errors.Wrap(err, "Failed to build transaction for removeTiKVMeta")
 	}
 	// Defer a rollback only if the transaction hasn't been committed
 	defer rollbackOnFailure(err, txn)
 
 	err = txn.Delete([]byte(key))
 	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("Failed to remove value for key %s in removeTiKVMeta", key))
+		return errors.Wrap(err, fmt.Sprintf("Failed to remove key %s in removeTiKVMeta", key))
 	}
 	err = commitTxn(txn, ctx1)
 
@@ -697,4 +686,14 @@ func (kv *txnTiKV) removeTiKVMeta(ctx context.Context, key string) error {
 
 func (kv *txnTiKV) CompareVersionAndSwap(key string, version int64, target string) (bool, error) {
 	return false, fmt.Errorf("Unimplemented! CompareVersionAndSwap is under deprecation")
+}
+
+// CheckElapseAndWarn checks the elapsed time and warns if it is too long.
+func CheckElapseAndWarn(start time.Time, message string, fields ...zap.Field) bool {
+	elapsed := time.Since(start)
+	if elapsed.Milliseconds() > 2000 {
+		log.Warn(message, append([]zap.Field{zap.String("time spent", elapsed.String())}, fields...)...)
+		return true
+	}
+	return false
 }
