@@ -45,6 +45,7 @@ const (
 	MaxSnapshotTS = uint64(math.MaxUint64)
 	// How many keys to scan per batch when using prefix
 	SnapshotScanSize = 256
+	EnableRollback   = false
 )
 
 // Empty value default
@@ -124,7 +125,7 @@ func (kv *txnTiKV) Has(key string) (bool, error) {
 }
 
 func rollbackOnFailure(err error, txn *transaction.KVTxn) {
-	if err != nil {
+	if err != nil && EnableRollback == true {
 		txn.Rollback()
 	}
 }
