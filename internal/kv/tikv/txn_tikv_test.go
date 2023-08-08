@@ -592,7 +592,32 @@ func TestLoadEmpty(t *testing.T) {
 	val, err = kv.Load("key3")
 	assert.NoError(t, err)
 	assert.Equal(t, val, "")
+}
 
+func TestScanSize(t *testing.T) {
+	var scan_size = int(SnapshotScanSize)
+	kv := NewTiKV(txnClient, "/")
+	err := kv.RemoveWithPrefix("")
+	require.NoError(t, err)
+
+	defer kv.Close()
+	defer kv.RemoveWithPrefix("")
+
+	// Test total > scansize
+	key_map := map[string]string{}
+	for i := 1; i <= scan_size+100; i++ {
+		a := fmt.Sprintf("%v", i)
+		key_map[a] = a
+	}
+
+	err = kv.MultiSave(key_map)
+	assert.NoError(t, err)
+
+	keys, _, err := kv.LoadWithPrefix("")
+	assert.Equal(t, len(keys), scan_size+100)
+
+	err = kv.RemoveWithPrefix("")
+	require.NoError(t, err)
 }
 
 func TestTiKVUnimplemented(t *testing.T) {
