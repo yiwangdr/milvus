@@ -18,7 +18,6 @@ package tikv
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"math"
 	"path"
@@ -47,6 +46,9 @@ const (
 	// How many keys to scan per batch when using prefix
 	SnapshotScanSize = 256
 )
+
+// Empty value default
+var EmptyValue = []byte{0}
 
 func tiTxnBegin(txn *txnkv.Client) (*transaction.KVTxn, error) {
 	return txn.Begin()
@@ -218,7 +220,14 @@ func (kv *txnTiKV) MultiLoad(keys []string) ([]string, error) {
 		if !ok {
 			missing_values = append(missing_values, string(k))
 		}
-		valid_values = append(valid_values, string(v))
+		// Check if empty value placeholder
+		var str_val string
+		if isEmpty(v) == true {
+			str_val = ""
+		} else {
+			str_val = string(v)
+		}
+		valid_values = append(valid_values, str_val)
 
 	}
 
@@ -252,11 +261,19 @@ func (kv *txnTiKV) LoadWithPrefix(prefix string) ([]string, []string, error) {
 
 	var keys []string
 	var values []string
+	var str_val string
 
 	// Iterate over the key-value pairs
 	for iter.Valid() {
+		val := iter.Value()
+		// Check if empty value placeholder
+		if isEmpty(val) == true {
+			str_val = ""
+		} else {
+			str_val = string(val)
+		}
 		keys = append(keys, string(iter.Key()))
-		values = append(values, string(iter.Value()))
+		values = append(values, str_val)
 		err = iter.Next()
 		if err != nil {
 			return nil, nil, errors.Wrap(err, fmt.Sprintf("Failed to iterate for LoadWithPrefix %s", prefix))
@@ -299,7 +316,12 @@ func (kv *txnTiKV) MultiSave(kvs map[string]string) error {
 
 	for key, value := range kvs {
 		key = path.Join(kv.rootPath, key)
-		err = txn.Set([]byte(key), []byte(value))
+		// Check if empty val and replace with placeholder
+		if len(value) == 0 {
+			err = txn.Set([]byte(key), EmptyValue)
+		} else {
+			err = txn.Set([]byte(key), []byte(value))
+		}
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("Failed to set (%s:%s) for MultiSave", key, value))
 		}
@@ -399,7 +421,13 @@ func (kv *txnTiKV) MultiSaveAndRemove(saves map[string]string, removals []string
 
 	for key, value := range saves {
 		key = path.Join(kv.rootPath, key)
-		if err = txn.Set([]byte(key), []byte(value)); err != nil {
+		// Check if empty val and replace with placeholder
+		if len(value) == 0 {
+			err = txn.Set([]byte(key), EmptyValue)
+		} else {
+			err = txn.Set([]byte(key), []byte(value))
+		}
+		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("Failed to set (%s:%s) for MultiSaveAndRemove", key, value))
 		}
 	}
@@ -492,7 +520,12 @@ func (kv *txnTiKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removal
 	// Save key-value pairs
 	for key, value := range saves {
 		key = path.Join(kv.rootPath, key)
-		err = txn.Set([]byte(key), []byte(value))
+		// Check if empty val and replace with placeholder
+		if len(value) == 0 {
+			err = txn.Set([]byte(key), EmptyValue)
+		} else {
+			err = txn.Set([]byte(key), []byte(value))
+		}
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("Failed to set (%s:%s) for MultiSaveAndRemoveWithPrefix", key, value))
 		}
@@ -557,9 +590,15 @@ func (kv *txnTiKV) WalkWithPrefix(prefix string, paginationSize int, fn func([]b
 
 	// Iterate over the key-value pairs
 	for iter.Valid() {
-		err = fn(iter.Key(), iter.Value())
+		// Grab value for empty check
+		byte_val := iter.Value()
+		// Check if empty val and replace with placeholder
+		if isEmpty(byte_val) == true {
+			byte_val = []byte{}
+		}
+		err = fn(iter.Key(), byte_val)
 		if err != nil {
-			return errors.Wrap(err, fmt.Sprintf("Failed to apply fn to (%s;%s)", string(iter.Key()), string(iter.Value())))
+			return errors.Wrap(err, fmt.Sprintf("Failed to apply fn to (%s;%s)", string(iter.Key()), string(byte_val)))
 		}
 		err = iter.Next()
 		if err != nil {
@@ -595,7 +634,6 @@ func (kv *txnTiKV) getTiKVMeta(ctx context.Context, key string) (string, error) 
 	ss := getSnapshot(kv.txn)
 
 	val, err := ss.Get(ctx1, []byte(key))
-
 	if err != nil {
 		// Log key read fail
 		metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.FailLabel).Inc()
@@ -609,15 +647,22 @@ func (kv *txnTiKV) getTiKVMeta(ctx context.Context, key string) (string, error) 
 		}
 	}
 
+	// Check if value is the empty placeholder
+	var str_val string
+	if isEmpty(val) == true {
+		str_val = ""
+	} else {
+		str_val = string(val)
+	}
+
 	elapsed := start.ElapseSpan()
-	totalSize := binary.Size(val)
 
 	metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.TotalLabel).Inc()
-	metrics.MetaKvSize.WithLabelValues(metrics.MetaGetLabel).Observe(float64(totalSize))
+	metrics.MetaKvSize.WithLabelValues(metrics.MetaGetLabel).Observe(float64(len(val)))
 	metrics.MetaRequestLatency.WithLabelValues(metrics.MetaGetLabel).Observe(float64(elapsed.Milliseconds()))
 	metrics.MetaOpCounter.WithLabelValues(metrics.MetaGetLabel, metrics.SuccessLabel).Inc()
 
-	return string(val), nil
+	return str_val, nil
 }
 
 func (kv *txnTiKV) putTiKVMeta(ctx context.Context, key, val string) error {
@@ -633,7 +678,14 @@ func (kv *txnTiKV) putTiKVMeta(ctx context.Context, key, val string) error {
 	// Defer a rollback only if the transaction hasn't been committed
 	defer rollbackOnFailure(err, txn)
 
-	err = txn.Set([]byte(key), []byte(val))
+	// Check if the value being written needs to be empty
+	var written_val []byte
+	if len(val) == 0 {
+		written_val = EmptyValue
+	} else {
+		written_val = []byte(val)
+	}
+	err = txn.Set([]byte(key), written_val)
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("Failed to get value for key %s in putTiKVMeta", key))
 	}
@@ -642,7 +694,7 @@ func (kv *txnTiKV) putTiKVMeta(ctx context.Context, key, val string) error {
 	elapsed := start.ElapseSpan()
 	metrics.MetaOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.TotalLabel).Inc()
 	if err == nil {
-		metrics.MetaKvSize.WithLabelValues(metrics.MetaPutLabel).Observe(float64(len(val)))
+		metrics.MetaKvSize.WithLabelValues(metrics.MetaPutLabel).Observe(float64(len(written_val)))
 		metrics.MetaRequestLatency.WithLabelValues(metrics.MetaPutLabel).Observe(float64(elapsed.Milliseconds()))
 		metrics.MetaOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.SuccessLabel).Inc()
 	} else {
@@ -695,5 +747,21 @@ func CheckElapseAndWarn(start time.Time, message string, fields ...zap.Field) bo
 		log.Warn(message, append([]zap.Field{zap.String("time spent", elapsed.String())}, fields...)...)
 		return true
 	}
+	return false
+}
+
+// Since tikv cannot store empty keys, we reserve EmptyValue as the empty string
+func isEmpty(value []byte) bool {
+	if len(value) == len(EmptyValue) {
+		for i, v := range value {
+			if v != EmptyValue[i] {
+				// If we see mismatch, it isnt equal to placeholder
+				return false
+			}
+		}
+		// If we see equal length and no mismatch, it is empty
+		return true
+	}
+	// If different length, it isnt equal to placeholder
 	return false
 }
