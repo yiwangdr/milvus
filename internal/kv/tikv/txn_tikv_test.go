@@ -41,10 +41,6 @@ func TestTiKVLoad(te *testing.T) {
 		defer kv.Close()
 		defer kv.RemoveWithPrefix("")
 
-		// Disallow empty value
-		err = kv.Save("keyh2", "")
-		assert.Error(t, err)
-
 		saveAndLoadTests := []struct {
 			key   string
 			value string
@@ -527,6 +523,76 @@ func TestHasPrefix(t *testing.T) {
 	has, err = kv.HasPrefix("key")
 	assert.NoError(t, err)
 	assert.False(t, has)
+}
+
+func TestLoadEmpty(t *testing.T) {
+	rootPath := "/etcd/test/root/loadempty"
+	kv := NewTiKV(txnClient, rootPath)
+	err := kv.RemoveWithPrefix("")
+	require.NoError(t, err)
+
+	defer kv.Close()
+	defer kv.RemoveWithPrefix("")
+
+	has, err := kv.HasPrefix("key")
+	assert.NoError(t, err)
+	assert.False(t, has)
+
+	err = kv.Save("key", "")
+	assert.NoError(t, err)
+
+	has, err = kv.HasPrefix("key")
+	assert.NoError(t, err)
+	assert.True(t, has)
+
+	val, err := kv.Load("key")
+	assert.NoError(t, err)
+	assert.Equal(t, val, "")
+
+	_, vals, err := kv.LoadWithPrefix("key")
+	assert.NoError(t, err)
+	assert.Equal(t, vals[0], "")
+
+	vals, err = kv.MultiLoad([]string{"key"})
+	assert.Equal(t, vals[0], "")
+
+	var res string
+	nothing := func(key, val []byte) error {
+		res = string(val)
+		return nil
+	}
+
+	err = kv.WalkWithPrefix("", 1, nothing)
+	assert.NoError(t, err)
+	assert.Equal(t, res, "")
+
+	multiSaveTests := map[string]string{
+		"key1": "",
+	}
+	err = kv.MultiSave(multiSaveTests)
+	assert.NoError(t, err)
+	val, err = kv.Load("key1")
+	assert.NoError(t, err)
+	assert.Equal(t, val, "")
+
+	multiSaveTests = map[string]string{
+		"key2": "",
+	}
+	err = kv.MultiSaveAndRemove(multiSaveTests, nil)
+	assert.NoError(t, err)
+	val, err = kv.Load("key2")
+	assert.NoError(t, err)
+	assert.Equal(t, val, "")
+
+	multiSaveTests = map[string]string{
+		"key3": "",
+	}
+	err = kv.MultiSaveAndRemoveWithPrefix(multiSaveTests, nil)
+	assert.NoError(t, err)
+	val, err = kv.Load("key3")
+	assert.NoError(t, err)
+	assert.Equal(t, val, "")
+
 }
 
 func TestTiKVUnimplemented(t *testing.T) {
