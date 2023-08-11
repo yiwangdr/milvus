@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
+	"github.com/tikv/client-go/v2/txnkv"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -44,6 +45,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/tikv"
 )
 
 type ServerSuite struct {
@@ -60,9 +62,12 @@ type ServerSuite struct {
 	// Mocks
 	broker *meta.MockBroker
 
-	server *Server
-	nodes  []*mocks.MockQueryNode
+	tikvCli *txnkv.Client
+	server  *Server
+	nodes   []*mocks.MockQueryNode
 }
+
+var testMeta string
 
 func (suite *ServerSuite) SetupSuite() {
 	Params.Init()
@@ -100,7 +105,10 @@ func (suite *ServerSuite) SetupSuite() {
 
 func (suite *ServerSuite) SetupTest() {
 	var err error
+	paramtable.Get().Save(paramtable.Get().MetaStoreCfg.MetaStoreType.Key, testMeta)
+	suite.tikvCli = tikv.SetupLocalTxn()
 	suite.server, err = suite.newQueryCoord()
+
 	suite.Require().NoError(err)
 	suite.hackServer()
 	err = suite.server.Start()
@@ -131,6 +139,7 @@ func (suite *ServerSuite) TearDownTest() {
 			node.Stop()
 		}
 	}
+	paramtable.Get().Reset(paramtable.Get().MetaStoreCfg.MetaStoreType.Key)
 }
 
 func (suite *ServerSuite) TestRecover() {
@@ -574,6 +583,8 @@ func (suite *ServerSuite) newQueryCoord() (*Server, error) {
 		return nil, err
 	}
 	server.SetEtcdClient(etcdCli)
+	server.SetTiKVClient(suite.tikvCli)
+
 	server.SetQueryNodeCreator(session.DefaultQueryNodeCreator)
 	suite.hackBroker(server)
 	err = server.Init()
@@ -581,5 +592,9 @@ func (suite *ServerSuite) newQueryCoord() (*Server, error) {
 }
 
 func TestServer(t *testing.T) {
-	suite.Run(t, new(ServerSuite))
+	parameters := []string{"tikv", "etcd"}
+	for _, v := range parameters {
+		testMeta = v
+		suite.Run(t, new(ServerSuite))
+	}
 }

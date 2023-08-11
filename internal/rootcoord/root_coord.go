@@ -28,6 +28,7 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
+	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -38,6 +39,7 @@ import (
 	"github.com/milvus-io/milvus/internal/allocator"
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	tikv "github.com/milvus-io/milvus/internal/kv/tikv"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/db/dao"
 	"github.com/milvus-io/milvus/internal/metastore/db/dbcore"
@@ -84,13 +86,7 @@ var Params *paramtable.ComponentParam = paramtable.Get()
 
 type Opt func(*Core)
 
-type metaKVCreator func(root string) (kv.MetaKv, error)
-
-func defaultMetaKVCreator(etcdCli *clientv3.Client) metaKVCreator {
-	return func(root string) (kv.MetaKv, error) {
-		return etcdkv.NewEtcdKV(etcdCli, root), nil
-	}
-}
+type metaKVCreator func() (kv.MetaKv, error)
 
 // Core root coordinator core
 type Core struct {
@@ -98,6 +94,7 @@ type Core struct {
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup
 	etcdCli          *clientv3.Client
+	tikvCli          *txnkv.Client
 	address          string
 	meta             IMetaTable
 	scheduler        IScheduler
@@ -308,6 +305,11 @@ func (c *Core) SetEtcdClient(etcdClient *clientv3.Client) {
 	c.etcdCli = etcdClient
 }
 
+// SetTiKVClient sets the tikvCli of Core
+func (c *Core) SetTiKVClient(client *txnkv.Client) {
+	c.tikvCli = client
+}
+
 func (c *Core) initSession() error {
 	c.session = sessionutil.NewSession(c.ctx, Params.EtcdCfg.MetaRootPath.GetValue(), c.etcdCli)
 	if c.session == nil {
@@ -320,7 +322,15 @@ func (c *Core) initSession() error {
 
 func (c *Core) initKVCreator() {
 	if c.metaKVCreator == nil {
-		c.metaKVCreator = defaultMetaKVCreator(c.etcdCli)
+		if Params.MetaStoreCfg.MetaStoreType.GetValue() == util.MetaStoreTypeTiKV {
+			c.metaKVCreator = func() (kv.MetaKv, error) {
+				return tikv.NewTiKV(c.tikvCli, Params.TiKVCfg.MetaRootPath.GetValue()), nil
+			}
+		} else {
+			c.metaKVCreator = func() (kv.MetaKv, error) {
+				return etcdkv.NewEtcdKV(c.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue()), nil
+			}
+		}
 	}
 }
 
@@ -331,18 +341,32 @@ func (c *Core) initMetaTable() error {
 
 		switch Params.MetaStoreCfg.MetaStoreType.GetValue() {
 		case util.MetaStoreTypeEtcd:
+			log.Info("Using etcd as meta storage.")
 			var metaKV kv.MetaKv
 			var ss *kvmetestore.SuffixSnapshot
 			var err error
 
-			if metaKV, err = c.metaKVCreator(Params.EtcdCfg.MetaRootPath.GetValue()); err != nil {
+			if metaKV, err = c.metaKVCreator(); err != nil {
 				return err
 			}
 
 			if ss, err = kvmetestore.NewSuffixSnapshot(metaKV, kvmetestore.SnapshotsSep, Params.EtcdCfg.MetaRootPath.GetValue(), kvmetestore.SnapshotPrefix); err != nil {
 				return err
 			}
+			catalog = &kvmetestore.Catalog{Txn: metaKV, Snapshot: ss}
+		case util.MetaStoreTypeTiKV:
+			log.Info("Using tikv as meta storage.")
+			var metaKV kv.MetaKv
+			var ss *kvmetestore.SuffixSnapshot
+			var err error
 
+			if metaKV, err = c.metaKVCreator(); err != nil {
+				return err
+			}
+
+			if ss, err = kvmetestore.NewSuffixSnapshot(metaKV, kvmetestore.SnapshotsSep, Params.TiKVCfg.MetaRootPath.GetValue(), kvmetestore.SnapshotPrefix); err != nil {
+				return err
+			}
 			catalog = &kvmetestore.Catalog{Txn: metaKV, Snapshot: ss}
 		case util.MetaStoreTypeMysql:
 			// connect to database
@@ -367,7 +391,15 @@ func (c *Core) initMetaTable() error {
 }
 
 func (c *Core) initIDAllocator() error {
-	tsoKV := tsoutil2.NewTSOKVBase(c.etcdCli, Params.EtcdCfg.KvRootPath.GetValue(), globalIDAllocatorSubPath)
+	var tsoKV kv.TxnKV
+	var kvPath string
+	if Params.MetaStoreCfg.MetaStoreType.GetValue() == util.MetaStoreTypeTiKV {
+		kvPath = Params.TiKVCfg.KvRootPath.GetValue()
+		tsoKV = tsoutil2.NewTSOTiKVBase(c.tikvCli, kvPath, globalIDAllocatorSubPath)
+	} else {
+		kvPath = Params.EtcdCfg.KvRootPath.GetValue()
+		tsoKV = tsoutil2.NewTSOKVBase(c.etcdCli, kvPath, globalIDAllocatorSubPath)
+	}
 	idAllocator := allocator.NewGlobalIDAllocator(globalIDAllocatorKey, tsoKV)
 	if err := idAllocator.Initialize(); err != nil {
 		return err
@@ -375,7 +407,7 @@ func (c *Core) initIDAllocator() error {
 	c.idAllocator = idAllocator
 
 	log.Info("id allocator initialized",
-		zap.String("root_path", Params.EtcdCfg.KvRootPath.GetValue()),
+		zap.String("root_path", kvPath),
 		zap.String("sub_path", globalIDAllocatorSubPath),
 		zap.String("key", globalIDAllocatorKey))
 
@@ -383,7 +415,15 @@ func (c *Core) initIDAllocator() error {
 }
 
 func (c *Core) initTSOAllocator() error {
-	tsoKV := tsoutil2.NewTSOKVBase(c.etcdCli, Params.EtcdCfg.KvRootPath.GetValue(), globalTSOAllocatorSubPath)
+	var tsoKV kv.TxnKV
+	var kvPath string
+	if Params.MetaStoreCfg.MetaStoreType.GetValue() == util.MetaStoreTypeTiKV {
+		kvPath = Params.TiKVCfg.KvRootPath.GetValue()
+		tsoKV = tsoutil2.NewTSOTiKVBase(c.tikvCli, Params.TiKVCfg.KvRootPath.GetValue(), globalIDAllocatorSubPath)
+	} else {
+		kvPath = Params.EtcdCfg.KvRootPath.GetValue()
+		tsoKV = tsoutil2.NewTSOKVBase(c.etcdCli, Params.EtcdCfg.KvRootPath.GetValue(), globalIDAllocatorSubPath)
+	}
 	tsoAllocator := tso2.NewGlobalTSOAllocator(globalTSOAllocatorKey, tsoKV)
 	if err := tsoAllocator.Initialize(); err != nil {
 		return err
@@ -391,7 +431,7 @@ func (c *Core) initTSOAllocator() error {
 	c.tsoAllocator = tsoAllocator
 
 	log.Info("tso allocator initialized",
-		zap.String("root_path", Params.EtcdCfg.KvRootPath.GetValue()),
+		zap.String("root_path", kvPath),
 		zap.String("sub_path", globalIDAllocatorSubPath),
 		zap.String("key", globalIDAllocatorKey))
 
@@ -399,7 +439,7 @@ func (c *Core) initTSOAllocator() error {
 }
 
 func (c *Core) initImportManager() error {
-	impTaskKv, err := c.metaKVCreator(Params.EtcdCfg.KvRootPath.GetValue())
+	impTaskKv, err := c.metaKVCreator()
 	if err != nil {
 		return err
 	}

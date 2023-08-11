@@ -27,6 +27,7 @@ import (
 const (
 	MetaStoreTypeEtcd  = "etcd"
 	MetaStoreTypeMysql = "mysql"
+	MetaStoreTypeTiKV  = "tikv"
 
 	SegmentMetaPrefix    = "queryCoord-segmentMeta"
 	ChangeInfoMetaPrefix = "queryCoord-sealedSegmentChangeInfo"
